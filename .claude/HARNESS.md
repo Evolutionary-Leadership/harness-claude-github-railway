@@ -212,6 +212,12 @@ These files are maintained by the harness and replaced on
 
 **Note:** `harness-railway.yml` is a one-time setup workflow that
 self-destructs after its first run. It is not part of ongoing upgrades.
+It can be triggered two ways: manually via the Actions tab ("Run
+workflow"), or by writing a one-line `.harness-bootstrap` file to the
+`dev` branch (used by the harnesscompanion.com wizard via the GitHub
+MCP server, which can write files but not dispatch workflows). The
+final cleanup step removes both `.github/workflows/harness-railway.yml`
+and `.harness-bootstrap`, so the trigger can never re-fire.
 
 ## Harness-provided starting points
 

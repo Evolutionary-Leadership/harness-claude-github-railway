@@ -110,16 +110,21 @@ current claude/ branch.
 6. Restore the two files from stash: `git checkout stash -- CHANGELOG.md .release-description.md`
 7. Commit: `git commit -m "chore: release $NEW_VERSION"`
 8. Push: `git push origin dev`
-9. Clean up orphaned feature branch (session-start auto-creates one):
-   `if [[ "$CURRENT_BRANCH" == claude/* ]]; then WITHOUT_PREFIX="${CURRENT_BRANCH#claude/}"; FEATURE_NAME="${WITHOUT_PREFIX%-*}"; git push origin --delete "feature/$FEATURE_NAME" 2>/dev/null || true; fi`
+9. Clean up orphaned branches (session-start auto-creates `feature/<name>`,
+   and the source `claude/<name>` may still exist if `claude-to-feature-branch.yml`
+   failed or was skipped):
+   `if [[ "$CURRENT_BRANCH" == claude/* ]]; then WITHOUT_PREFIX="${CURRENT_BRANCH#claude/}"; FEATURE_NAME="${WITHOUT_PREFIX%-*}"; git push origin --delete "feature/$FEATURE_NAME" 2>/dev/null || true; git push origin --delete "$CURRENT_BRANCH" 2>/dev/null || true; fi`
 10. Return: `git checkout "$CURRENT_BRANCH"`
 11. Restore working state: `git stash pop || true`
 
 **Note:** The session-start hook auto-creates a `feature/` branch and Railway
-environment for every `claude/` session. Since the release skill bypasses the
-feature branch entirely, step 9 cleans up the orphaned branch. Deleting the
-remote branch triggers `feature-branch-cleanup.yml`, which removes any
-associated Railway environment automatically.
+environment for every `claude/` session, and the source `claude/` branch is
+normally deleted by `claude-to-feature-branch.yml`. Since the release skill
+bypasses the feature branch chain entirely, step 9 cleans up both, in case
+either survived (e.g. the cleanup workflow failed mid-run, or the release
+file landed on `claude/` and triggered the `is_release` skip). Deleting
+the remote `feature/` branch triggers `feature-branch-cleanup.yml`, which
+removes any associated Railway environment automatically.
 
 ### 8. Inform the user
 

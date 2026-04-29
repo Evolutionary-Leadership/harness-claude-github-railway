@@ -92,6 +92,9 @@ Tell the user:
 - If there are merge conflicts, the PR will be left open with resolution
   instructions
 - The feature branch will be cleaned up automatically
+- They can stay in this chat and chain `/release` once the merge lands. The
+  release skill works on `dev` and never re-pushes the `claude/` branch, so
+  it will not re-trigger feature branch creation.
 
 ### 7. If the workflow fails
 

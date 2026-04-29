@@ -2,6 +2,16 @@ name: "00. Create Railway environments (one time only for a fresh repository)"
 
 on:
   workflow_dispatch:
+  # Sentinel-file trigger: lets a fresh Claude Code session bootstrap
+  # provisioning via the GitHub MCP server (which has create_or_update_file
+  # but no workflow_dispatch tool). Claude writes a one-line
+  # .harness-bootstrap to dev; this push fires the workflow. The cleanup
+  # step at the end deletes both this workflow file and .harness-bootstrap,
+  # so the trigger can never re-fire after a successful run.
+  push:
+    branches: [dev]
+    paths:
+      - .harness-bootstrap
 
 concurrency:
   group: harness-railway-setup
@@ -620,9 +630,17 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch origin main 2>/dev/null || true
           git merge origin/main --no-edit -m "merge: align dev with main before cleanup" 2>/dev/null || true
+          REMOVED=false
           if [ -f .github/workflows/harness-railway.yml ]; then
             git rm .github/workflows/harness-railway.yml
-            git commit -m "chore: remove harness workflow (one-time use)"
+            REMOVED=true
+          fi
+          if [ -f .harness-bootstrap ]; then
+            git rm .harness-bootstrap
+            REMOVED=true
+          fi
+          if [ "$REMOVED" = true ]; then
+            git commit -m "chore: remove harness bootstrap files (one-time use)"
             git push origin dev && git push origin dev:main || \
-              echo "::warning::Could not auto-remove harness workflow. Delete .github/workflows/harness-railway.yml manually."
+              echo "::warning::Could not auto-remove bootstrap files. Delete .github/workflows/harness-railway.yml and .harness-bootstrap manually."
           fi

@@ -161,6 +161,11 @@ going through a PR).
 **Gotcha:** Don't push to a merged branch. After `/mergedev`, both branches
 are deleted remotely. Pushing again re-creates everything from scratch.
 
+**`/release` after `/mergedev` in the same chat is fine.** The release skill
+works on `dev` (stash, switch, commit, push, return) and never pushes the
+`claude/` branch, so it does not re-trigger feature branch creation. No
+need to start a new chat for a release.
+
 ## Releasing to production
 
 Use `/release` (with optional `major`, `minor`, or `patch` argument) to ship
