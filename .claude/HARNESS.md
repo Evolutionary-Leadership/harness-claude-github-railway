@@ -231,6 +231,12 @@ diffed and you choose whether to accept upstream changes.
 | `.github/dependabot.yml` | Add entries for your package ecosystems (npm, pip, Docker, etc.) |
 | `railway.json` | Customize build commands, start commands, restart policy for your app |
 
+The harness ships `.claude/settings.json` with an `env` block that sets
+`API_TIMEOUT_MS=900000` and `CLAUDE_CODE_MAX_RETRIES=15` to harden
+sessions against stream idle timeouts. Keep these values (or raise them)
+when you add your own keys; see "Avoiding stream timeouts" in
+`claude-md-snippet.md` for context.
+
 ## Starter scaffold (write-once)
 
 The harness ships a minimal Node + Express "it works" app so the Railway

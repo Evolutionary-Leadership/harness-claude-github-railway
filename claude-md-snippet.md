@@ -31,6 +31,29 @@ the starter back.
 
 - Never use em dashes (U+2014). Use commas, colons, semicolons, or parentheses instead. A PreToolUse hook will block any write containing an em dash
 
+## Avoiding stream timeouts
+
+The "API Error: Stream idle timeout, partial response received" error
+fires when the API stream stays silent for too long mid-response. The
+harness sets `API_TIMEOUT_MS=900000` and `CLAUDE_CODE_MAX_RETRIES=15` in
+`.claude/settings.json` so long responses have headroom and transient
+network blips get retried. Claude cannot detect a pending timeout from
+inside a turn (the stall happens in the API layer), so the rest is
+habits that keep any single turn from going quiet for too long:
+
+- Avoid single tool calls that produce huge output. Cap noisy commands
+  with `| head` or narrow paths, and prefer `Read` with `offset`/`limit`
+  over reading whole large files.
+- Break large file writes into multiple `Edit` calls instead of one
+  mega `Write`.
+- Run `/compact` proactively at natural seams (after finishing a
+  sub-task, before starting a long multi-tool sequence) rather than
+  waiting for context pressure.
+- Prefer parallel small tool calls over a single huge sequential one.
+
+If a timeout still fires, the next prompt usually completes the work;
+check status.claude.com if it persists across sessions.
+
 ## Feature development workflow
 
 The full lifecycle from idea to merged feature is automated. Railway

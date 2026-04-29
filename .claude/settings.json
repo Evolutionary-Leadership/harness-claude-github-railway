@@ -1,4 +1,8 @@
 {
+  "env": {
+    "API_TIMEOUT_MS": "900000",
+    "CLAUDE_CODE_MAX_RETRIES": "15"
+  },
   "hooks": {
     "PreToolUse": [
       {
