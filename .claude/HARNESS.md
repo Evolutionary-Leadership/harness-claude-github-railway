@@ -107,6 +107,20 @@ Each feature gets a fully isolated Railway environment:
   feature is merged
 - Preview URL stored in `.railway-url` on the feature branch
 
+**Region default:** Services (app + Postgres) are pinned to **EU West
+(Amsterdam, `europe-west4-drams3a`)** by default so they co-locate with
+the object-storage bucket (`BUCKET_REGION: ams`). Without this pin,
+Railway places new services in US East (Virginia), which puts the app
+and Postgres on the opposite side of the Atlantic from the bucket.
+The pin is applied by `feature-branch-railway.yml` (for feature
+environments) and the one-time `harness-railway.yml` (for production
+and dev). To switch regions, change the `SERVICE_REGION` env var at the
+top of both workflows; valid values are listed in Railway's
+`serviceInstanceUpdate` GraphQL docs (e.g. `us-east4-eqdc4a`,
+`asia-southeast1-eqsg3a`). Existing services do not migrate
+automatically; changing `SERVICE_REGION` only affects services created
+after the change.
+
 **Database migrations:** Each feature environment starts with an empty
 database. Your migration tooling must handle creating tables from scratch.
 
@@ -128,7 +142,8 @@ to bail out early on production.
 
 Use any S3-compatible client library. Each environment's bucket is
 completely isolated, with no cross-contamination between feature, dev,
-and production.
+and production. Buckets are created in the `ams` (Amsterdam) region by
+default, matching the EU West service region pin described above.
 
 ## Managed trait files
 

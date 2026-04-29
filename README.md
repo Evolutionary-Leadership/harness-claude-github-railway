@@ -1,4 +1,4 @@
-> Generated from `evolutionary-leadership/harness-forge@0979341`. Do not edit here. Edit in the source repo.
+> Generated from `evolutionary-leadership/harness-forge@36a07ec`. Do not edit here. Edit in the source repo.
 
 # harness-claude-github-railway
 
@@ -30,7 +30,11 @@ with your real app whenever you're ready.
 
 - A `dev` and `main` branch convention with auto-merge for features
   and a release flow that promotes `dev` to `main`.
-- Per-feature Railway preview environments, torn down on merge.
+- Per-feature Railway preview environments, torn down on merge. App,
+  Postgres, and the object-storage bucket are pinned to **EU West
+  (Amsterdam)** by default so they co-locate; override via
+  `SERVICE_REGION` in `.github/workflows/harness-railway.yml` and
+  `.github/workflows/feature-branch-railway.yml`.
 - A `.claude/` directory with skills, hooks, and agents tuned for the
   feature lifecycle and the Railway preview flow.
 - GitHub Actions workflows that wrap the lifecycle and the Railway

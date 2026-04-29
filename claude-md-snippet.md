@@ -113,6 +113,14 @@ libraries handle this automatically when given the base endpoint.
 Feature branch environments get their own bucket with isolated credentials,
 so you won't accidentally touch production data.
 
+**Region:** App service, Postgres, and the bucket are pinned to **EU West
+(Amsterdam, `europe-west4-drams3a`)** by default so they co-locate and
+avoid cross-Atlantic latency. The pin is set via the `SERVICE_REGION`
+env var at the top of `.github/workflows/harness-railway.yml` (production
+and dev) and `.github/workflows/feature-branch-railway.yml` (per-feature
+envs). Change both if you want a different region; existing services do
+not migrate automatically.
+
 ### Seed data
 
 Seed data runs by default on all environments. Production has

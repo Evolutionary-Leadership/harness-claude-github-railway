@@ -55,6 +55,9 @@ jobs:
           PROJECT_NAME: ${{ github.event.repository.name }}
           REPO: ${{ github.repository }}
           BUCKET_REGION: ams
+          # Railway services default to US East (Virginia) unless overridden.
+          # Pin EU West (Amsterdam) so app + Postgres co-locate with the bucket.
+          SERVICE_REGION: europe-west4-drams3a
         run: |
           set -euo pipefail
 
@@ -73,6 +76,29 @@ jobs:
               return 1
             fi
             echo "$response"
+          }
+
+          # Pin a service's region in a given environment. serviceInstanceUpdate
+          # writes config without redeploying; for newly-created services this
+          # is fine because the first build picks up the configured region.
+          set_service_region() {
+            local svc_id="$1"
+            local env_id="$2"
+            local resp
+            resp=$(curl -s -X POST "$API_URL" \
+              -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n \
+                --arg sid "$svc_id" \
+                --arg eid "$env_id" \
+                --arg region "$SERVICE_REGION" \
+                '{query: "mutation($sid: String!, $eid: String!, $region: String!) { serviceInstanceUpdate(serviceId: $sid, environmentId: $eid, input: { region: $region }) }", variables: {sid: $sid, eid: $eid, region: $region}}')")
+            if echo "$resp" | jq -e '.errors' > /dev/null 2>&1; then
+              echo "::warning::Failed to set region=$SERVICE_REGION on service $svc_id (env $env_id):"
+              echo "$resp" | jq '.errors' >&2
+              return 1
+            fi
+            return 0
           }
 
           echo "=== Step 1: Get workspace ID ==="
@@ -427,6 +453,9 @@ jobs:
               # old name ("Postgres") no longer resolves in reference variables.
               gql "mutation { serviceUpdate(id: \\\"$PG_SVC_ID\\\", input: { name: \\\"${PROJECT_NAME}-db\\\" }) { id } }" > /dev/null
               echo "Renamed Postgres service to ${PROJECT_NAME}-db"
+              if set_service_region "$PG_SVC_ID" "$PROD_ENV_ID"; then
+                echo "Pinned Postgres region to $SERVICE_REGION (production)"
+              fi
               break
             fi
             sleep 1
@@ -534,6 +563,10 @@ jobs:
             echo "Created app service: $SERVICE_ID (source=$REPO, branch=main, variables wired)"
           fi
 
+          if set_service_region "$SERVICE_ID" "$PROD_ENV_ID"; then
+            echo "Pinned app service region to $SERVICE_REGION (production)"
+          fi
+
           # Verify the source binding stuck. If it didn't, surface a clear
           # warning rather than letting the user discover it later via the
           # "GitHub Repo not found" dashboard error.
@@ -567,6 +600,18 @@ jobs:
               gql "mutation { deploymentTriggerUpdate(id: \\\"$TID\\\", input: { branch: \\\"dev\\\" }) { id } }" > /dev/null
               echo "Set dev trigger $TID → dev"
             done
+          fi
+
+          # Defensive: re-pin region for the dev fork. environmentCreate should
+          # carry per-instance config from production, but Railway forks have
+          # been seen to drop pieces silently.
+          if set_service_region "$SERVICE_ID" "$DEV_ENV_ID"; then
+            echo "Pinned app service region to $SERVICE_REGION (dev)"
+          fi
+          if [ -n "$PG_SVC_ID" ]; then
+            if set_service_region "$PG_SVC_ID" "$DEV_ENV_ID"; then
+              echo "Pinned Postgres region to $SERVICE_REGION (dev)"
+            fi
           fi
 
           echo ""

@@ -63,6 +63,9 @@ jobs:
         env:
           RAILWAY_ACCOUNT_TOKEN: ${{ secrets.RAILWAY_ACCOUNT_TOKEN }}
           RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          # Keep in sync with harness-railway.yml. Railway forks default to
+          # US East unless every service-instance carries a region override.
+          SERVICE_REGION: europe-west4-drams3a
         run: |
           FEATURE_NAME="${{ steps.feature.outputs.name }}"
           FEATURE_BRANCH="${{ steps.feature.outputs.branch }}"
@@ -80,6 +83,19 @@ jobs:
             else
               echo '{"data":null}'
             fi
+          }
+
+          set_service_region() {
+            local svc_id="$1"
+            local env_id="$2"
+            curl -s -X POST "$API_URL" \
+              -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n \
+                --arg sid "$svc_id" \
+                --arg eid "$env_id" \
+                --arg region "$SERVICE_REGION" \
+                '{query: "mutation($sid: String!, $eid: String!, $region: String!) { serviceInstanceUpdate(serviceId: $sid, environmentId: $eid, input: { region: $region }) }", variables: {sid: $sid, eid: $eid, region: $region}}')" > /dev/null || true
           }
 
           # 1. Get the dev environment ID
@@ -117,7 +133,20 @@ jobs:
           SERVICES_LIST=$(gql "query { project(id: \\\"$PROJECT_ID\\\") { services { edges { node { id name } } } } }")
           APP_SERVICE_ID=$(echo "$SERVICES_LIST" | jq -r '[.data.project.services.edges[].node | select(.name | test("postgres|db|storage"; "i") | not)][0].id // empty')
           PG_SVC_NAME=$(echo "$SERVICES_LIST" | jq -r '[.data.project.services.edges[].node | select(.name | test("db|postgres"; "i"))][0].name // empty')
+          PG_SVC_ID=$(echo "$SERVICES_LIST" | jq -r '[.data.project.services.edges[].node | select(.name | test("db|postgres"; "i"))][0].id // empty')
           PG_REF=$(railref "${PG_SVC_NAME}.DATABASE_URL")
+
+          # Pin region for the forked feature environment. environmentCreate
+          # *should* carry per-instance region from dev, but inheritance is
+          # not guaranteed, so set it explicitly.
+          if [ -n "$APP_SERVICE_ID" ]; then
+            set_service_region "$APP_SERVICE_ID" "$ENV_ID"
+            echo "Pinned app service region to $SERVICE_REGION (feature env)"
+          fi
+          if [ -n "$PG_SVC_ID" ]; then
+            set_service_region "$PG_SVC_ID" "$ENV_ID"
+            echo "Pinned Postgres region to $SERVICE_REGION (feature env)"
+          fi
 
           # Derive storage service name from Railway project name.
           # Object Storage doesn't appear in project.services GraphQL query.
