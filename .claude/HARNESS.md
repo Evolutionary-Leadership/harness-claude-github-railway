@@ -219,6 +219,20 @@ MCP server, which can write files but not dispatch workflows). The
 final cleanup step removes both `.github/workflows/harness-railway.yml`
 and `.harness-bootstrap`, so the trigger can never re-fire.
 
+The cleanup commit (titled `chore: remove harness bootstrap files
+(one-time use)`) carries the provisioned Railway URLs in its body in a
+stable, grep-friendly shape:
+
+```
+production-url: https://<prod-domain>
+dev-url: https://<dev-domain>
+```
+
+A bootstrapping Claude Code session (or the harnesscompanion.com setup
+wizard) can fetch those URLs via `list_commits` on `dev` instead of
+asking the user to copy them out of the workflow's Job Summary. Treat
+this commit body shape as a contract: tooling parses it by line key.
+
 ## Harness-provided starting points
 
 The harness created these files as a starting point. You own them, so
