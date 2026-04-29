@@ -92,23 +92,60 @@ jobs:
           echo ""
           echo "=== Step 1b: Verify Railway GitHub App can see the repo ==="
           # serviceCreate (Step 5) records the repo via the Railway GitHub
-          # App installation tied to the account behind RAILWAY_ACCOUNT_TOKEN.
-          # If the App isn't installed on this repo's owner (or doesn't
-          # include this repo in its allowed list), serviceCreate still
-          # returns success, but Railway's UI later shows
-          # "GitHub Repo not found" and webhook-driven redeploys silently
-          # stop working. Fail fast here with an actionable message.
-          GH_REPOS=$(gql "{ githubRepos { fullName } }" 2>/dev/null || echo '{"data":{"githubRepos":[]}}')
-          HAS_REPO=$(echo "$GH_REPOS" | jq -r --arg repo "$REPO" '[.data.githubRepos[]? | select(.fullName == $repo)] | length // 0')
-          if [ "$HAS_REPO" = "0" ]; then
-            OWNER="${REPO%%/*}"
-            echo "::error::Railway's GitHub App cannot see '$REPO'."
+          # App installation tied to the GitHub user linked to the account
+          # behind RAILWAY_ACCOUNT_TOKEN. If that account can't see this
+          # repo via githubRepos, serviceCreate still returns success but
+          # Railway's UI later shows "GitHub Repo not found" and webhook
+          # redeploys silently stop. Fail fast, but surface enough detail
+          # to tell *why* (HTTP error, GraphQL schema drift, account-link
+          # mismatch, or a real missing-install) instead of guessing.
+          GH_RESP=$(curl -s -w '\n%{http_code}' -X POST "$API_URL" \
+            -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"query":"{ githubRepos { fullName } }"}')
+          GH_HTTP=$(echo "$GH_RESP" | tail -n1)
+          GH_BODY=$(echo "$GH_RESP" | sed '$d')
+          OWNER="${REPO%%/*}"
+
+          if [ "$GH_HTTP" != "200" ]; then
+            echo "::error::Railway API returned HTTP $GH_HTTP querying githubRepos."
+            echo "Response body:" >&2
+            echo "$GH_BODY" >&2
+            echo "" >&2
+            echo "This is a Railway API problem, not a GitHub App problem." >&2
+            echo "Re-run the workflow; if it persists, check status.railway.com." >&2
+            exit 1
+          fi
+
+          if echo "$GH_BODY" | jq -e '.errors' > /dev/null 2>&1; then
+            echo "::error::Railway GraphQL returned errors querying githubRepos:"
+            echo "$GH_BODY" | jq '.errors' >&2
+            echo "" >&2
+            echo "The pre-flight gate is failing closed on a GraphQL error," >&2
+            echo "not on a real access problem. Likely causes:" >&2
+            echo "  - Railway's schema for githubRepos changed (renamed, or" >&2
+            echo "    now requires an installationId / pagination arg)." >&2
+            echo "  - RAILWAY_ACCOUNT_TOKEN is a project token, not an" >&2
+            echo "    account token (only account tokens see githubRepos)." >&2
+            exit 1
+          fi
+
+          if ! echo "$GH_BODY" | jq -e '.data.githubRepos' > /dev/null 2>&1; then
+            echo "::error::Unexpected response shape from githubRepos query:"
+            echo "$GH_BODY" | jq . >&2
+            exit 1
+          fi
+
+          REPO_COUNT=$(echo "$GH_BODY" | jq -r '.data.githubRepos | length')
+          HAS_REPO=$(echo "$GH_BODY" | jq -r --arg repo "$REPO" '[.data.githubRepos[]? | select(.fullName == $repo)] | length')
+
+          if [ "$HAS_REPO" = "0" ] && [ "$REPO_COUNT" = "0" ]; then
+            echo "::error::Railway's GitHub App is not installed for this account."
             cat >&2 <<EOF
-          Railway's GitHub App is not installed on this repo (or its owner
-          '$OWNER'), or its allowed-repository list excludes '$REPO'.
-          Without it, Railway records the repo connection but can't resolve
-          it: the UI shows "GitHub Repo not found" and pushes to dev/main
-          stop triggering deploys.
+          githubRepos returned an empty list. This means the Railway
+          GitHub App is not installed for the GitHub user linked to
+          RAILWAY_ACCOUNT_TOKEN, or that Railway account is not linked
+          to a GitHub user at all.
 
           Fix:
             1. Open https://github.com/apps/railway-app/installations/new
@@ -122,7 +159,23 @@ jobs:
           EOF
             exit 1
           fi
-          echo "Verified: Railway GitHub App has access to $REPO"
+
+          if [ "$HAS_REPO" = "0" ]; then
+            echo "::error::Railway can see $REPO_COUNT repos but '$REPO' is not among them."
+            echo "First 20 visible repos (compare against '$REPO' for case/typos):" >&2
+            echo "$GH_BODY" | jq -r '.data.githubRepos[].fullName' | head -20 >&2
+            echo "" >&2
+            echo "If '$REPO' is missing from the full list, the Railway GitHub" >&2
+            echo "App's allowed-repository list excludes it on '$OWNER'. Open" >&2
+            echo "https://github.com/apps/railway-app/installations/new and" >&2
+            echo "grant access (or 'All repositories' on '$OWNER')." >&2
+            echo "" >&2
+            echo "If the list above looks wrong (different org, missing repos)," >&2
+            echo "the Railway account behind RAILWAY_ACCOUNT_TOKEN is linked" >&2
+            echo "to a different GitHub user than expected." >&2
+            exit 1
+          fi
+          echo "Verified: Railway GitHub App has access to $REPO ($REPO_COUNT total visible)"
 
           echo ""
           echo "=== Step 2: Check for existing project ==="
