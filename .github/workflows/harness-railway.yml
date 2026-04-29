@@ -1,0 +1,628 @@
+name: "00. Create Railway environments (one time only for a fresh repository)"
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: harness-railway-setup
+  cancel-in-progress: false
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          fetch-depth: 0
+
+      - name: Validate secrets
+        env:
+          RAILWAY_ACCOUNT_TOKEN: ${{ secrets.RAILWAY_ACCOUNT_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          MISSING=""
+          if [ -z "$RAILWAY_ACCOUNT_TOKEN" ]; then
+            MISSING="$MISSING RAILWAY_ACCOUNT_TOKEN"
+          fi
+          if [ -z "$PAT_TOKEN" ]; then
+            MISSING="$MISSING PAT_TOKEN"
+          fi
+          if [ -n "$MISSING" ]; then
+            echo "::error::Missing required secrets:$MISSING"
+            echo "Go to your repo Settings > Secrets and variables > Actions and add them."
+            echo "See the setup guide for details on creating these tokens."
+            exit 1
+          fi
+          echo "All required secrets are configured."
+
+      - name: Harness Railway project
+        env:
+          RAILWAY_ACCOUNT_TOKEN: ${{ secrets.RAILWAY_ACCOUNT_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          PROJECT_NAME: ${{ github.event.repository.name }}
+          REPO: ${{ github.repository }}
+          BUCKET_REGION: ams
+        run: |
+          set -euo pipefail
+
+          API_URL="https://backboard.railway.com/graphql/v2"
+
+          gql() {
+            local query="$1"
+            local response
+            response=$(curl -sf -X POST "$API_URL" \
+              -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"query\":\"$query\"}")
+            if echo "$response" | jq -e '.errors' > /dev/null 2>&1; then
+              echo "GraphQL error:" >&2
+              echo "$response" | jq '.errors' >&2
+              return 1
+            fi
+            echo "$response"
+          }
+
+          echo "=== Step 1: Get workspace ID ==="
+          # CRITICAL: me.workspaces is a FLAT ARRAY, NOT relay edges.
+          # Do NOT use { edges { node { id name } } }. It will fail with
+          # "Cannot query field edges on type Workspace"
+          ME=$(gql "{ me { workspaces { id name } } }")
+          WORKSPACE_ID=$(echo "$ME" | jq -r '.data.me.workspaces[0].id')
+          WORKSPACE_NAME=$(echo "$ME" | jq -r '.data.me.workspaces[0].name')
+          echo "Workspace: $WORKSPACE_NAME ($WORKSPACE_ID)"
+
+          if [ -z "$WORKSPACE_ID" ] || [ "$WORKSPACE_ID" = "null" ]; then
+            echo "Error: Could not find workspace. Check your RAILWAY_ACCOUNT_TOKEN."
+            exit 1
+          fi
+
+          echo ""
+          echo "=== Step 2: Check for existing project ==="
+          PROJECTS=$(gql "{ projects { edges { node { id name } } } }")
+          EXISTING_ID=$(echo "$PROJECTS" | jq -r ".data.projects.edges[].node | select(.name == \"$PROJECT_NAME\") | .id // empty")
+
+          if [ -n "$EXISTING_ID" ]; then
+            echo "Project '$PROJECT_NAME' already exists (ID: $EXISTING_ID)."
+            echo "Skipping creation, using existing project."
+            PROJECT_ID="$EXISTING_ID"
+          else
+            echo "Creating project '$PROJECT_NAME'..."
+            # defaultEnvironmentName avoids needing environmentRename later
+            CREATE_PROJ=$(gql "mutation { projectCreate(input: { name: \\\"$PROJECT_NAME\\\", workspaceId: \\\"$WORKSPACE_ID\\\", defaultEnvironmentName: \\\"production\\\" }) { id name } }")
+            PROJECT_ID=$(echo "$CREATE_PROJ" | jq -r '.data.projectCreate.id')
+            echo "Created project: $PROJECT_ID"
+          fi
+
+          if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ]; then
+            echo "Error: Failed to create or find project."
+            exit 1
+          fi
+
+          echo ""
+          echo "=== Step 2b: Push seed commit (minimal deployable app) ==="
+          # Railway's Railpack needs something to detect. An empty repo fails.
+          # Push a minimal Express app to main and dev so first deploy succeeds.
+          cd "$GITHUB_WORKSPACE"
+
+          if [ -f Dockerfile ]; then
+            echo "::warning::A Dockerfile was detected in your repo. Railway will use it instead of Railpack auto-detection. If this is unintended, rename it to Dockerfile.bak and re-run."
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Only push seed if package.json doesn't exist yet (truly empty repo)
+          if [ ! -f package.json ]; then
+            cat > package.json <<EOF
+          {
+            "name": "$PROJECT_NAME",
+            "version": "0.1.0",
+            "private": true,
+            "scripts": { "start": "node server.js" },
+            "dependencies": { "express": "^4.21.0" }
+          }
+          EOF
+
+            cat > server.js <<'EOF'
+          const express = require('express');
+          const app = express();
+          const PORT = process.env.PORT || 3000;
+          app.use(express.static('public'));
+          app.listen(PORT, () => console.log(`Listening on ${PORT}`));
+          EOF
+
+            mkdir -p public
+            cat > public/index.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>App</title>
+            <style>
+              body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f5f5f5; color: #333; }
+              .card { background: white; border-radius: 12px; padding: 2rem 3rem; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center; }
+              h1 { margin: 0 0 0.5rem; }
+              p { margin: 0; color: #666; }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <h1>Up and running</h1>
+              <p>Deploy succeeded. Start building!</p>
+            </div>
+          </body>
+          </html>
+          EOF
+
+            git add package.json server.js public/index.html
+            git commit -m "seed: minimal Express app for Railway deploy"
+
+            # We're on dev (the branch selected in "Run workflow from").
+            # Push seed to dev first, then ensure main exists too.
+            git push origin dev
+
+            # Create main from dev if it doesn't exist yet
+            if ! git ls-remote --exit-code origin main > /dev/null 2>&1; then
+              git checkout -b main
+              git push origin main
+              git checkout dev
+            else
+              # main exists, so merge it into dev so dev is a superset, then push
+              git fetch origin main
+              git merge origin/main --no-edit -m "merge: align dev with main before seed push"
+              git push origin dev
+              git push origin dev:main
+            fi
+            echo "Seed commit pushed to dev and main"
+          else
+            echo "package.json already exists, skipping seed commit"
+            # Dev has app code but main may not. serviceConnect (Step 3)
+            # triggers a build from main, so sync dev to main now.
+            git fetch origin main 2>/dev/null || true
+            if git rev-parse --verify origin/main > /dev/null 2>&1; then
+              if ! git merge origin/main --no-edit -m "merge: align dev with main before Railway setup" 2>/dev/null; then
+                git merge --abort 2>/dev/null || true
+                echo "::warning::Could not automatically merge main into dev. Pushing dev content to main instead."
+              fi
+              git push origin HEAD:main
+            else
+              git push origin HEAD:main
+            fi
+            echo "Synced dev to main"
+          fi
+
+          # Give GitHub a few seconds to propagate the push.
+          # Without this, serviceConnect may trigger a build against a
+          # stale clone that doesn't include the code just pushed to main.
+          sleep 5
+
+          echo ""
+          echo "=== Step 3: Create service ==="
+          # Check if a service already exists
+          SERVICES=$(gql "query { project(id: \\\"$PROJECT_ID\\\") { services { edges { node { id name } } } } }")
+          SERVICE_ID=$(echo "$SERVICES" | jq -r '.data.project.services.edges[0].node.id // empty')
+
+          NEEDS_CONNECT=false
+          if [ -n "$SERVICE_ID" ]; then
+            echo "Service already exists: $SERVICE_ID"
+          else
+            # serviceCreate makes an empty service (no deployment triggered).
+            # serviceConnect is deferred to Step 5d so the first deploy
+            # already has DATABASE_URL and bucket credentials available.
+            CREATE_SVC=$(gql "mutation { serviceCreate(input: { projectId: \\\"$PROJECT_ID\\\", name: \\\"${PROJECT_NAME}-app\\\" }) { id name } }")
+            SERVICE_ID=$(echo "$CREATE_SVC" | jq -r '.data.serviceCreate.id')
+            echo "Created service: $SERVICE_ID"
+            NEEDS_CONNECT=true
+          fi
+
+          if [ -z "$SERVICE_ID" ] || [ "$SERVICE_ID" = "null" ]; then
+            echo "Error: Failed to create or find service."
+            exit 1
+          fi
+
+          echo ""
+          echo "=== Step 4: Configure production environment ==="
+          # projectCreate with defaultEnvironmentName:"production" auto-creates it
+          ENVS=$(gql "query { environments(projectId: \\\"$PROJECT_ID\\\") { edges { node { id name } } } }")
+          PROD_ENV_ID=$(echo "$ENVS" | jq -r '.data.environments.edges[].node | select(.name == "production") | .id')
+
+          # Fallback: if no "production" env, take the first one and rename it
+          if [ -z "$PROD_ENV_ID" ]; then
+            PROD_ENV_ID=$(echo "$ENVS" | jq -r '.data.environments.edges[0].node.id')
+            # environmentRename returns a scalar, so don't select fields from it
+            gql "mutation { environmentRename(id: \\\"$PROD_ENV_ID\\\", input: { name: \\\"production\\\" }) }" > /dev/null
+            echo "Renamed default environment to 'production'"
+          fi
+          echo "Production environment: $PROD_ENV_ID"
+          # Deployment trigger configuration is deferred to Step 5d
+          # (after serviceConnect).
+
+          echo ""
+          echo "=== Step 5: Deploy PostgreSQL to production ==="
+          # Deploy Postgres + bucket to production FIRST, then fork to create dev.
+          # The app service is not yet connected to the repo, so no deployment
+          # is in flight. This ensures DATABASE_URL and bucket credentials are
+          # available before the first app deployment.
+          PG_DEPLOYED=false
+          PG_TEMPLATE=$(gql "{ template(code: \\\"postgres\\\") { id serializedConfig } }")
+          PG_TEMPLATE_ID=$(echo "$PG_TEMPLATE" | jq -r '.data.template.id // empty')
+
+          if [ -z "$PG_TEMPLATE_ID" ]; then
+            echo "Error: Could not fetch Postgres template. Deploy Postgres manually via the Railway dashboard."
+          else
+            PG_SERIALIZED=$(echo "$PG_TEMPLATE" | jq -c '.data.template.serializedConfig')
+            echo "Postgres template: $PG_TEMPLATE_ID"
+
+            DEPLOY_PG_PROD=$(curl -sf -X POST "$API_URL" \
+              -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n \
+                --arg tid "$PG_TEMPLATE_ID" \
+                --arg pid "$PROJECT_ID" \
+                --arg eid "$PROD_ENV_ID" \
+                --arg wid "$WORKSPACE_ID" \
+                --argjson sc "$PG_SERIALIZED" \
+                '{query: "mutation($input: TemplateDeployV2Input!) { templateDeployV2(input: $input) { projectId workflowId } }", variables: {input: {templateId: $tid, serializedConfig: $sc, projectId: $pid, environmentId: $eid, workspaceId: $wid}}}')")
+            PG_PROD_WORKFLOW=$(echo "$DEPLOY_PG_PROD" | jq -r '.data.templateDeployV2.workflowId // empty')
+            if [ -n "$PG_PROD_WORKFLOW" ]; then
+              echo "Postgres deployed to production (workflow: $PG_PROD_WORKFLOW)"
+              PG_DEPLOYED=true
+            else
+              echo "Warning: Postgres deployment to production may have failed:"
+              echo "$DEPLOY_PG_PROD" | jq .
+              echo "You can deploy Postgres manually via the Railway dashboard."
+            fi
+          fi
+
+          echo ""
+          echo "=== Step 5b: Create Object Storage bucket (production) ==="
+          railref() { printf '\044'; printf '{'; printf '{%s}}' "$1"; }
+          curl -fsSL https://railway.com/install.sh | sh
+          export RAILWAY_API_TOKEN="$RAILWAY_ACCOUNT_TOKEN"
+
+          BUCKET_CREATED=false
+          STORAGE_SVC_NAME="${PROJECT_NAME}-storage"
+          echo "Creating bucket for production..."
+          if railway link -p "$PROJECT_ID" -e "$PROD_ENV_ID" 2>&1 && \
+             railway bucket create "$STORAGE_SVC_NAME" --region "$BUCKET_REGION" 2>&1; then
+            BUCKET_CREATED=true
+            echo "Bucket created for production"
+          else
+            echo "Warning: Bucket creation for production may have failed."
+            echo "You can create a bucket manually via the Railway dashboard."
+          fi
+
+          echo ""
+          echo "=== Step 5c: Wait for Postgres and bucket to provision ==="
+          # templateDeployV2 is async. Wait for the Postgres service to appear
+          # and its deployment to reach SUCCESS before forking to dev.
+          echo "Waiting for Postgres service to appear in project..."
+          PG_SVC_ID=""
+          for i in $(seq 1 30); do
+            SVC_LIST=$(gql "query { project(id: \\\"$PROJECT_ID\\\") { services { edges { node { id name } } } } }")
+            PG_SVC_ID=$(echo "$SVC_LIST" | jq -r '[.data.project.services.edges[].node | select(.name | test("postgres"; "i"))][0].id // empty')
+            if [ -n "$PG_SVC_ID" ]; then
+              echo "Postgres service found after ${i}s (ID: $PG_SVC_ID)"
+              # Rename to follow naming convention
+              gql "mutation { serviceUpdate(id: \\\"$PG_SVC_ID\\\", input: { name: \\\"${PROJECT_NAME}-db\\\" }) { id } }" > /dev/null
+              echo "Renamed Postgres service to ${PROJECT_NAME}-db"
+              break
+            fi
+            sleep 1
+          done
+
+          # Poll deployment status until SUCCESS (up to 120s).
+          # The fork must happen AFTER Postgres is fully deployed, otherwise
+          # dev inherits only the volume but not the running service.
+          if [ -n "$PG_SVC_ID" ]; then
+            echo "Waiting for Postgres deployment to reach SUCCESS..."
+            for i in $(seq 1 60); do
+              DEP_RESP=$(curl -sf -X POST "$API_URL" \
+                -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "$(jq -n \
+                  --arg pid "$PROJECT_ID" \
+                  --arg eid "$PROD_ENV_ID" \
+                  --arg sid "$PG_SVC_ID" \
+                  '{query: "query($input: DeploymentListInput!) { deployments(first: 1, input: $input) { edges { node { status } } } }", variables: {input: {projectId: $pid, environmentId: $eid, serviceId: $sid}}}')" 2>/dev/null) || true
+              DEP_STATUS=$(echo "$DEP_RESP" | jq -r '.data.deployments.edges[0].node.status // empty' 2>/dev/null) || true
+              if [ "$DEP_STATUS" = "SUCCESS" ]; then
+                echo "Postgres deployment completed after $((i * 2))s"
+                break
+              elif [ "$DEP_STATUS" = "FAILED" ] || [ "$DEP_STATUS" = "CRASHED" ]; then
+                echo "Warning: Postgres deployment status: $DEP_STATUS"
+                break
+              fi
+              echo "  status: ${DEP_STATUS:-initializing} ($i/60)"
+              sleep 2
+            done
+          fi
+
+          # Wire DATABASE_URL now that Postgres exists.
+          # Use the renamed service name. After serviceUpdate, the old
+          # name ("Postgres") no longer resolves in reference variables.
+          PG_DB_NAME="${PROJECT_NAME}-db"
+          PG_REF=$(railref "${PG_DB_NAME}.DATABASE_URL")
+
+          if [ "$PG_DEPLOYED" != true ]; then
+            echo "Skipping DATABASE_URL wiring (Postgres deployment failed)"
+          else
+          echo "Wiring DATABASE_URL to app service (production)..."
+          WIRE_PROD_RESP=$(curl -s -X POST "$API_URL" \
+            -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg pid "$PROJECT_ID" \
+              --arg eid "$PROD_ENV_ID" \
+              --arg sid "$SERVICE_ID" \
+              --arg dbref "$PG_REF" \
+              '{query: "mutation($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }", variables: {input: {projectId: $pid, environmentId: $eid, serviceId: $sid, variables: {"DATABASE_URL": $dbref}}}}')")
+          if echo "$WIRE_PROD_RESP" | jq -e '.errors' > /dev/null 2>&1; then
+            echo "Warning: Failed to wire DATABASE_URL to production app service:"
+            echo "$WIRE_PROD_RESP" | jq '.errors'
+          else
+            echo "Set DATABASE_URL on app service (production)"
+          fi
+
+          # Set SEED_DATA=false on production to prevent seed scripts from running.
+          # Dev and feature environments do NOT get this, so they seed normally.
+          echo "Setting SEED_DATA=false on production..."
+          SEED_PROD_RESP=$(curl -s -X POST "$API_URL" \
+            -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg pid "$PROJECT_ID" \
+              --arg eid "$PROD_ENV_ID" \
+              --arg sid "$SERVICE_ID" \
+              '{query: "mutation($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }", variables: {input: {projectId: $pid, environmentId: $eid, serviceId: $sid, variables: {"SEED_DATA": "false"}}}}')")
+          if echo "$SEED_PROD_RESP" | jq -e '.errors' > /dev/null 2>&1; then
+            echo "Warning: Failed to set SEED_DATA=false on production:"
+            echo "$SEED_PROD_RESP" | jq '.errors'
+          else
+            echo "Set SEED_DATA=false on production"
+          fi
+          fi  # end PG_DEPLOYED gate
+
+          # Wire bucket credentials to production.
+          # Railway's "Add to Service" sets reference variables on the app
+          # service pointing to the bucket's own variables. The bucket
+          # exposes: BUCKET, ENDPOINT, REGION, ACCESS_KEY_ID, SECRET_ACCESS_KEY.
+          if [ "$BUCKET_CREATED" = true ]; then
+            echo "Wiring bucket credentials to app service (production)..."
+            BUCKET_REF=$(railref "${STORAGE_SVC_NAME}.BUCKET")
+            ENDPOINT_REF=$(railref "${STORAGE_SVC_NAME}.ENDPOINT")
+            ACCESSKEY_REF=$(railref "${STORAGE_SVC_NAME}.ACCESS_KEY_ID")
+            SECRETKEY_REF=$(railref "${STORAGE_SVC_NAME}.SECRET_ACCESS_KEY")
+            REGION_REF=$(railref "${STORAGE_SVC_NAME}.REGION")
+
+            WIRE_BUCKET_PROD=$(curl -s -X POST "$API_URL" \
+              -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n \
+                --arg pid "$PROJECT_ID" \
+                --arg eid "$PROD_ENV_ID" \
+                --arg sid "$SERVICE_ID" \
+                --arg bucket "$BUCKET_REF" \
+                --arg endpoint "$ENDPOINT_REF" \
+                --arg accesskey "$ACCESSKEY_REF" \
+                --arg secretkey "$SECRETKEY_REF" \
+                --arg region "$REGION_REF" \
+                '{query: "mutation($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }", variables: {input: {projectId: $pid, environmentId: $eid, serviceId: $sid, variables: {"AWS_S3_BUCKET_NAME": $bucket, "AWS_ENDPOINT_URL": $endpoint, "AWS_ACCESS_KEY_ID": $accesskey, "AWS_SECRET_ACCESS_KEY": $secretkey, "AWS_DEFAULT_REGION": $region}}}}')")
+            if echo "$WIRE_BUCKET_PROD" | jq -e '.errors' > /dev/null 2>&1; then
+              echo "Warning: Failed to wire bucket credentials to production app service:"
+              echo "$WIRE_BUCKET_PROD" | jq '.errors'
+            else
+              echo "Set bucket credentials on app service (production)"
+            fi
+          fi
+
+          echo ""
+          echo "=== Step 5d: Connect service to GitHub repo ==="
+          # Now that DATABASE_URL and bucket credentials are wired,
+          # connect the service to trigger the first deployment.
+          # This ensures the app starts with all env vars available.
+          if [ "$NEEDS_CONNECT" = true ]; then
+            gql "mutation { serviceConnect(id: \\\"$SERVICE_ID\\\", input: { repo: \\\"$REPO\\\", branch: \\\"main\\\" }) { id } }" > /dev/null
+            echo "Connected service to repo $REPO (triggers first deploy)"
+
+            # Poll for deployment triggers (up to 30s).
+            # serviceConnect creates triggers asynchronously.
+            PROD_TRIGGER_IDS=""
+            for i in $(seq 1 15); do
+              PROD_TRIGGERS=$(gql "query { deploymentTriggers(projectId: \\\"$PROJECT_ID\\\", environmentId: \\\"$PROD_ENV_ID\\\") { edges { node { id } } } }")
+              PROD_TRIGGER_IDS=$(echo "$PROD_TRIGGERS" | jq -r '.data.deploymentTriggers.edges[].node.id')
+              if [ -n "$PROD_TRIGGER_IDS" ]; then
+                break
+              fi
+              echo "  Waiting for deployment triggers... ($i/15)"
+              sleep 2
+            done
+
+            if [ -z "$PROD_TRIGGER_IDS" ]; then
+              echo "Warning: No deployment triggers found after 30s."
+              echo "The first deployment will still proceed."
+              echo "You may need to set the production branch to 'main' manually in Railway."
+            fi
+
+            for TID in $PROD_TRIGGER_IDS; do
+              gql "mutation { deploymentTriggerUpdate(id: \\\"$TID\\\", input: { branch: \\\"main\\\" }) { id } }" > /dev/null
+              echo "Set production trigger $TID -> main"
+            done
+          else
+            echo "Service was already connected, skipping."
+          fi
+
+          echo ""
+          echo "=== Step 6: Create dev environment ==="
+          # Fork from production AFTER Postgres + bucket + DATABASE_URL are set up.
+          # Dev inherits all services, variables, and bucket from the fork.
+          ENVS=$(gql "query { environments(projectId: \\\"$PROJECT_ID\\\") { edges { node { id name } } } }")
+          DEV_ENV_ID=$(echo "$ENVS" | jq -r '.data.environments.edges[].node | select(.name == "dev") | .id // empty')
+
+          if [ -n "$DEV_ENV_ID" ]; then
+            echo "Dev environment already exists: $DEV_ENV_ID"
+          else
+            CREATE_DEV=$(gql "mutation { environmentCreate(input: { name: \\\"dev\\\", projectId: \\\"$PROJECT_ID\\\", sourceEnvironmentId: \\\"$PROD_ENV_ID\\\" }) { id deploymentTriggers { edges { node { id } } } } }")
+            DEV_ENV_ID=$(echo "$CREATE_DEV" | jq -r '.data.environmentCreate.id')
+            echo "Created dev environment: $DEV_ENV_ID"
+
+            # Update triggers to deploy from dev branch
+            DEV_TRIGGER_IDS=$(echo "$CREATE_DEV" | jq -r '.data.environmentCreate.deploymentTriggers.edges[].node.id')
+            for TID in $DEV_TRIGGER_IDS; do
+              gql "mutation { deploymentTriggerUpdate(id: \\\"$TID\\\", input: { branch: \\\"dev\\\" }) { id } }" > /dev/null
+              echo "Set dev trigger $TID → dev"
+            done
+          fi
+
+          echo ""
+          echo "=== Step 6b: Wire DATABASE_URL to app service (dev) ==="
+          # Belt-and-suspenders: ensure dev has DATABASE_URL even if fork didn't inherit it
+          if [ "$PG_DEPLOYED" != true ]; then
+            echo "Skipping DATABASE_URL wiring for dev (Postgres deployment failed)"
+          else
+          WIRE_DEV_RESP=$(curl -s -X POST "$API_URL" \
+            -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg pid "$PROJECT_ID" \
+              --arg eid "$DEV_ENV_ID" \
+              --arg sid "$SERVICE_ID" \
+              --arg dbref "$PG_REF" \
+              '{query: "mutation($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }", variables: {input: {projectId: $pid, environmentId: $eid, serviceId: $sid, variables: {"DATABASE_URL": $dbref}}}}')")
+          if echo "$WIRE_DEV_RESP" | jq -e '.errors' > /dev/null 2>&1; then
+            echo "Warning: Failed to wire DATABASE_URL to dev app service:"
+            echo "$WIRE_DEV_RESP" | jq '.errors'
+          else
+            echo "Set DATABASE_URL on app service (dev)"
+          fi
+          fi  # end PG_DEPLOYED gate
+
+          echo ""
+          echo "=== Step 6c: Wire bucket credentials to app service (dev) ==="
+          BUCKET_REF=$(railref "${STORAGE_SVC_NAME}.BUCKET")
+          ENDPOINT_REF=$(railref "${STORAGE_SVC_NAME}.ENDPOINT")
+          ACCESSKEY_REF=$(railref "${STORAGE_SVC_NAME}.ACCESS_KEY_ID")
+          SECRETKEY_REF=$(railref "${STORAGE_SVC_NAME}.SECRET_ACCESS_KEY")
+          REGION_REF=$(railref "${STORAGE_SVC_NAME}.REGION")
+
+          WIRE_BUCKET_DEV=$(curl -s -X POST "$API_URL" \
+            -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg pid "$PROJECT_ID" \
+              --arg eid "$DEV_ENV_ID" \
+              --arg sid "$SERVICE_ID" \
+              --arg bucket "$BUCKET_REF" \
+              --arg endpoint "$ENDPOINT_REF" \
+              --arg accesskey "$ACCESSKEY_REF" \
+              --arg secretkey "$SECRETKEY_REF" \
+              --arg region "$REGION_REF" \
+              '{query: "mutation($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }", variables: {input: {projectId: $pid, environmentId: $eid, serviceId: $sid, variables: {"AWS_S3_BUCKET_NAME": $bucket, "AWS_ENDPOINT_URL": $endpoint, "AWS_ACCESS_KEY_ID": $accesskey, "AWS_SECRET_ACCESS_KEY": $secretkey, "AWS_DEFAULT_REGION": $region}}}}')")
+          if echo "$WIRE_BUCKET_DEV" | jq -e '.errors' > /dev/null 2>&1; then
+            echo "Warning: Failed to wire bucket credentials to dev app service:"
+            echo "$WIRE_BUCKET_DEV" | jq '.errors'
+          else
+            echo "Set bucket credentials on app service (dev)"
+          fi
+
+          echo ""
+          echo "=== Step 7: Create Railway domains ==="
+          PROD_DOMAIN=""
+          DEV_DOMAIN=""
+
+          # Production domain
+          PROD_DOMAIN_RESP=$(gql "mutation { serviceDomainCreate(input: { serviceId: \\\"$SERVICE_ID\\\", environmentId: \\\"$PROD_ENV_ID\\\" }) { domain } }") || true
+          PROD_DOMAIN=$(echo "$PROD_DOMAIN_RESP" | jq -r '.data.serviceDomainCreate.domain // empty' 2>/dev/null) || true
+          if [ -n "$PROD_DOMAIN" ]; then
+            echo "Production: https://$PROD_DOMAIN"
+          else
+            echo "Warning: Production domain may already exist or creation failed"
+          fi
+
+          # Dev domain
+          DEV_DOMAIN_RESP=$(gql "mutation { serviceDomainCreate(input: { serviceId: \\\"$SERVICE_ID\\\", environmentId: \\\"$DEV_ENV_ID\\\" }) { domain } }") || true
+          DEV_DOMAIN=$(echo "$DEV_DOMAIN_RESP" | jq -r '.data.serviceDomainCreate.domain // empty' 2>/dev/null) || true
+          if [ -n "$DEV_DOMAIN" ]; then
+            echo "Dev: https://$DEV_DOMAIN"
+          else
+            echo "Warning: Dev domain may already exist or creation failed"
+          fi
+
+          echo ""
+          echo "=== Step 8: Store RAILWAY_PROJECT_ID as GitHub secret ==="
+          # gh CLI handles encryption natively and is pre-installed on runners
+          export GH_TOKEN="$PAT_TOKEN"
+          if echo "$PROJECT_ID" | gh secret set RAILWAY_PROJECT_ID --repo "$REPO" 2>/dev/null; then
+            echo "Stored RAILWAY_PROJECT_ID as GitHub secret."
+          else
+            echo "::warning::Could not store RAILWAY_PROJECT_ID as a secret."
+            echo "Check that PAT_TOKEN has the 'Secrets' permission (read and write)."
+            echo "You can set it manually: go to repo Settings > Secrets > New secret"
+            echo "  Name:  RAILWAY_PROJECT_ID"
+            echo "  Value: $PROJECT_ID"
+          fi
+
+          echo ""
+          echo "=== Done ==="
+          echo "Project ID:  $PROJECT_ID"
+          if [ "$PG_DEPLOYED" = true ]; then
+            echo "Postgres:    Deployed (DATABASE_URL wired to app service)"
+          else
+            echo "Postgres:    FAILED. Deploy manually via Railway dashboard."
+          fi
+          if [ "$BUCKET_CREATED" = true ]; then
+            echo "Bucket:      Created (credentials auto-injected per environment)"
+          else
+            echo "Bucket:      FAILED. Create manually via Railway dashboard."
+          fi
+          echo "Production:  https://${PROD_DOMAIN:-'(see Railway dashboard)'}"
+          echo "Dev:         https://${DEV_DOMAIN:-'(see Railway dashboard)'}"
+
+          # Write GitHub Actions Job Summary for visibility
+          {
+            echo "## Railway Harness Setup Results"
+            echo ""
+            echo "| Component | Status |"
+            echo "|---|---|"
+            echo "| Project | $PROJECT_ID |"
+            if [ "$PG_DEPLOYED" = true ]; then
+              echo "| PostgreSQL | Deployed |"
+            else
+              echo "| PostgreSQL | **FAILED** (deploy manually) |"
+            fi
+            if [ "$BUCKET_CREATED" = true ]; then
+              echo "| Bucket | Created |"
+            else
+              echo "| Bucket | **FAILED** (create manually) |"
+            fi
+            if [ -n "$PROD_DOMAIN" ]; then
+              echo "| Production | https://$PROD_DOMAIN |"
+            else
+              echo "| Production | **No domain** (check Railway dashboard) |"
+            fi
+            if [ -n "$DEV_DOMAIN" ]; then
+              echo "| Dev | https://$DEV_DOMAIN |"
+            else
+              echo "| Dev | **No domain** (check Railway dashboard) |"
+            fi
+            echo ""
+            echo "### Next steps"
+            echo "Start a new Claude Code session on the \`dev\` branch and build something!"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove harness workflow (one-time use)
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main 2>/dev/null || true
+          git merge origin/main --no-edit -m "merge: align dev with main before cleanup" 2>/dev/null || true
+          if [ -f .github/workflows/harness-railway.yml ]; then
+            git rm .github/workflows/harness-railway.yml
+            git commit -m "chore: remove harness workflow (one-time use)"
+            git push origin dev && git push origin dev:main || \
+              echo "::warning::Could not auto-remove harness workflow. Delete .github/workflows/harness-railway.yml manually."
+          fi
