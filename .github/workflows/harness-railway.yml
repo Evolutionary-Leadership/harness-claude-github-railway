@@ -812,6 +812,24 @@ jobs:
               else
                 echo "::warning::Could not delete RAILWAY_WORKSPACE_ID variable. Remove it manually under Settings > Secrets and variables > Actions > Variables. (Variable may simply not exist, which is fine.)"
               fi
+
+              # Delete any claude/* and feature/* branches left over from
+              # the bootstrap session. The first session does not call
+              # /mergedev (it runs the setup prompt via MCP on dev), so
+              # the session-start hook's init commit creates a stray
+              # feature/<name> branch that would otherwise leak. This
+              # workflow self-deletes after success, so it can only run
+              # during bootstrap, never against an established repo
+              # where these branches would represent real work.
+              git ls-remote --refs origin 'refs/heads/claude/*' 'refs/heads/feature/*' 2>/dev/null \
+                | awk '{print $2}' | sed 's|^refs/heads/||' | while read -r br; do
+                  [ -z "$br" ] && continue
+                  if git push origin --delete "$br" 2>/dev/null; then
+                    echo "Deleted stray bootstrap branch: $br"
+                  else
+                    echo "::warning::Could not delete bootstrap branch '$br'; remove it manually."
+                  fi
+                done
             else
               echo "::warning::Could not auto-remove bootstrap files. Delete .github/workflows/harness-railway.yml and .harness-bootstrap manually."
             fi

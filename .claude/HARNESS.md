@@ -248,6 +248,17 @@ wizard) can fetch those URLs via `list_commits` on `dev` instead of
 asking the user to copy them out of the workflow's Job Summary. Treat
 this commit body shape as a contract: tooling parses it by line key.
 
+After pushing the cleanup commit, the same step also retires the
+one-time-use `RAILWAY_WORKSPACE_ID` repo variable (if it was set) and
+deletes any stray `claude/*` and `feature/*` branches left over from
+the bootstrap session. The bootstrap session does not run `/mergedev`,
+so the session-start hook's init commit can leave a `feature/<name>`
+branch behind that nothing else cleans up; doing it here keeps a
+freshly bootstrapped repo tidy. Because the workflow self-deletes
+beforehand, this branch cleanup can only ever run during first-repo
+bootstrap, never against an established repo where those branches
+would represent real work.
+
 ## Harness-provided starting points
 
 The harness created these files as a starting point. You own them, so
