@@ -52,6 +52,7 @@ jobs:
         env:
           RAILWAY_ACCOUNT_TOKEN: ${{ secrets.RAILWAY_ACCOUNT_TOKEN }}
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          RAILWAY_WORKSPACE_ID: ${{ vars.RAILWAY_WORKSPACE_ID }}
           PROJECT_NAME: ${{ github.event.repository.name }}
           REPO: ${{ github.repository }}
           BUCKET_REGION: ams
@@ -106,8 +107,25 @@ jobs:
           # Do NOT use { edges { node { id name } } }. It will fail with
           # "Cannot query field edges on type Workspace"
           ME=$(gql "{ me { workspaces { id name } } }")
-          WORKSPACE_ID=$(echo "$ME" | jq -r '.data.me.workspaces[0].id')
-          WORKSPACE_NAME=$(echo "$ME" | jq -r '.data.me.workspaces[0].name')
+          WORKSPACE_COUNT=$(echo "$ME" | jq '.data.me.workspaces | length')
+          if [ -n "${RAILWAY_WORKSPACE_ID:-}" ]; then
+            WORKSPACE_NAME=$(echo "$ME" | jq -r --arg id "$RAILWAY_WORKSPACE_ID" \
+              '.data.me.workspaces[] | select(.id == $id) | .name')
+            if [ -z "$WORKSPACE_NAME" ]; then
+              echo "::error::RAILWAY_WORKSPACE_ID '$RAILWAY_WORKSPACE_ID' not found. Available workspaces:"
+              echo "$ME" | jq -r '.data.me.workspaces[] | "  - \(.id)  \(.name)"'
+              exit 1
+            fi
+            WORKSPACE_ID="$RAILWAY_WORKSPACE_ID"
+          elif [ "$WORKSPACE_COUNT" = "1" ]; then
+            WORKSPACE_ID=$(echo "$ME" | jq -r '.data.me.workspaces[0].id')
+            WORKSPACE_NAME=$(echo "$ME" | jq -r '.data.me.workspaces[0].name')
+          else
+            WORKSPACE_ID=$(echo "$ME" | jq -r '.data.me.workspaces[0].id')
+            WORKSPACE_NAME=$(echo "$ME" | jq -r '.data.me.workspaces[0].name')
+            echo "::warning::Multiple Railway workspaces found and RAILWAY_WORKSPACE_ID is not set. Defaulting to the first workspace returned by the API ($WORKSPACE_NAME). To pick explicitly, set the RAILWAY_WORKSPACE_ID repo variable under Settings > Secrets and variables > Actions > Variables and re-trigger the bootstrap. Available workspaces:"
+            echo "$ME" | jq -r '.data.me.workspaces[] | "  - \(.id)  \(.name)"'
+          fi
           echo "Workspace: $WORKSPACE_NAME ($WORKSPACE_ID)"
 
           if [ -z "$WORKSPACE_ID" ] || [ "$WORKSPACE_ID" = "null" ]; then
@@ -696,7 +714,7 @@ jobs:
             echo "Stored RAILWAY_PROJECT_ID as GitHub secret."
           else
             echo "::warning::Could not store RAILWAY_PROJECT_ID as a secret."
-            echo "Check that PAT_TOKEN has the 'Secrets' permission (read and write)."
+            echo "Check that PAT_TOKEN has 'Secrets: Read and write' (for storing RAILWAY_PROJECT_ID) and 'Variables: Read and write' (for cleaning up RAILWAY_WORKSPACE_ID)."
             echo "You can set it manually: go to repo Settings > Secrets > New secret"
             echo "  Name:  RAILWAY_PROJECT_ID"
             echo "  Value: $PROJECT_ID"
@@ -760,6 +778,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove harness workflow (one-time use)
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           cd "$GITHUB_WORKSPACE"
           git config user.name "github-actions[bot]"
@@ -784,6 +805,14 @@ jobs:
             DEV_LINE="dev-url: $( [ -n "${DEV_DOMAIN:-}" ] && echo "https://${DEV_DOMAIN}" || echo "(unknown)" )"
             COMMIT_MSG=$(printf 'chore: remove harness bootstrap files (one-time use)\n\n%s\n%s\n' "$PROD_LINE" "$DEV_LINE")
             git commit -m "$COMMIT_MSG"
-            git push origin dev && git push origin dev:main || \
+            if git push origin dev && git push origin dev:main; then
+              export GH_TOKEN="$PAT_TOKEN"
+              if gh variable delete RAILWAY_WORKSPACE_ID --repo "$REPO" 2>/dev/null; then
+                echo "Removed RAILWAY_WORKSPACE_ID variable (no longer needed)."
+              else
+                echo "::warning::Could not delete RAILWAY_WORKSPACE_ID variable. Remove it manually under Settings > Secrets and variables > Actions > Variables. (Variable may simply not exist, which is fine.)"
+              fi
+            else
               echo "::warning::Could not auto-remove bootstrap files. Delete .github/workflows/harness-railway.yml and .harness-bootstrap manually."
+            fi
           fi
