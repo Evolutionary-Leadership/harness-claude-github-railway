@@ -93,19 +93,23 @@ jobs:
           echo "=== Step 1b: Verify Railway GitHub App can see the repo ==="
           # serviceCreate (Step 5) records the repo via the Railway GitHub
           # App installation tied to the GitHub user linked to the account
-          # behind RAILWAY_ACCOUNT_TOKEN. If that account can't see this
-          # repo via githubRepos, serviceCreate still returns success but
-          # Railway's UI later shows "GitHub Repo not found" and webhook
-          # redeploys silently stop. Fail fast, but surface enough detail
-          # to tell *why* (HTTP error, GraphQL schema drift, account-link
-          # mismatch, or a real missing-install) instead of guessing.
+          # behind RAILWAY_ACCOUNT_TOKEN. We check githubRepos to catch
+          # genuine missing-install cases up front (empty list, HTTP/schema
+          # errors), but treat "list non-empty, our repo missing" as
+          # warn-and-proceed: Railway's introspection cache for newly-
+          # created repos is unreliable and can stay stale indefinitely
+          # without an external nudge, so blocking (or polling) here would
+          # just stall automation on a cache problem we can't fix from the
+          # workflow. Step 5's post-create check catches any binding that
+          # didn't stick, and serviceCreate frequently resolves the install
+          # correctly even when githubRepos doesn't list the repo.
+          OWNER="${REPO%%/*}"
           GH_RESP=$(curl -s -w '\n%{http_code}' -X POST "$API_URL" \
             -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"query":"{ githubRepos { fullName } }"}')
           GH_HTTP=$(echo "$GH_RESP" | tail -n1)
           GH_BODY=$(echo "$GH_RESP" | sed '$d')
-          OWNER="${REPO%%/*}"
 
           if [ "$GH_HTTP" != "200" ]; then
             echo "::error::Railway API returned HTTP $GH_HTTP querying githubRepos."
@@ -139,7 +143,10 @@ jobs:
           REPO_COUNT=$(echo "$GH_BODY" | jq -r '.data.githubRepos | length')
           HAS_REPO=$(echo "$GH_BODY" | jq -r --arg repo "$REPO" '[.data.githubRepos[]? | select(.fullName == $repo)] | length')
 
-          if [ "$HAS_REPO" = "0" ] && [ "$REPO_COUNT" = "0" ]; then
+          if [ "$HAS_REPO" != "0" ]; then
+            echo "Verified: Railway GitHub App has access to $REPO ($REPO_COUNT total visible)"
+          elif [ "$REPO_COUNT" = "0" ]; then
+            # Empty list: no install at all. This never self-resolves.
             echo "::error::Railway's GitHub App is not installed for this account."
             cat >&2 <<EOF
           githubRepos returned an empty list. This means the Railway
@@ -158,24 +165,20 @@ jobs:
           GitHub user won't help.
           EOF
             exit 1
-          fi
-
-          if [ "$HAS_REPO" = "0" ]; then
-            echo "::error::Railway can see $REPO_COUNT repos but '$REPO' is not among them."
-            echo "First 20 visible repos (compare against '$REPO' for case/typos):" >&2
+          else
+            # Other repos visible, ours isn't. Almost always Railway's
+            # introspection cache is stale for a freshly-created repo;
+            # serviceCreate usually resolves the install correctly anyway.
+            # Warn loudly so the binding can be checked if Step 5's
+            # post-create verification later shows a mismatch.
+            echo "::warning::Railway's githubRepos view does not list '$REPO' ($REPO_COUNT other repos are visible)."
+            echo "First 20 visible repos:" >&2
             echo "$GH_BODY" | jq -r '.data.githubRepos[].fullName' | head -20 >&2
             echo "" >&2
-            echo "If '$REPO' is missing from the full list, the Railway GitHub" >&2
-            echo "App's allowed-repository list excludes it on '$OWNER'. Open" >&2
-            echo "https://github.com/apps/railway-app/installations/new and" >&2
-            echo "grant access (or 'All repositories' on '$OWNER')." >&2
-            echo "" >&2
-            echo "If the list above looks wrong (different org, missing repos)," >&2
-            echo "the Railway account behind RAILWAY_ACCOUNT_TOKEN is linked" >&2
-            echo "to a different GitHub user than expected." >&2
-            exit 1
+            echo "::warning::Most likely Railway's introspection cache is stale for this freshly-created repo. The App install itself appears correct (other repos under '$OWNER' are visible)."
+            echo "::warning::Less likely: '$REPO' is genuinely excluded from the App's allowed-repository list on '$OWNER'."
+            echo "::warning::Proceeding with serviceCreate; the post-create check at end of Step 5 will surface a warning if the source binding did not stick."
           fi
-          echo "Verified: Railway GitHub App has access to $REPO ($REPO_COUNT total visible)"
 
           echo ""
           echo "=== Step 2: Check for existing project ==="
