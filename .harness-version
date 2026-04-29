@@ -1,5 +1,5 @@
 harness: harness-claude-github-railway
-version: 0.3.49
+version: 0.3.51
 repo: Evolutionary-Leadership/harness-forge
 companion_url:
 traits:

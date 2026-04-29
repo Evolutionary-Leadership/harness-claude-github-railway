@@ -123,6 +123,21 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # Returns 0 if origin/main is the GitHub auto-init stub (single
+          # commit, no package.json), 1 otherwise. Used to decide whether
+          # it is safe to force-overwrite main with dev's seeded history.
+          is_main_stub() {
+            git fetch origin main --depth=50 2>/dev/null || return 1
+            git rev-parse --verify origin/main >/dev/null 2>&1 || return 1
+            local count
+            count=$(git rev-list --count origin/main)
+            [ "$count" -eq 1 ] || return 1
+            if git cat-file -e "origin/main:package.json" 2>/dev/null; then
+              return 1
+            fi
+            return 0
+          }
+
           # Only push seed if package.json doesn't exist yet (truly empty repo)
           if [ ! -f package.json ]; then
             cat > package.json <<EOF
@@ -179,27 +194,43 @@ jobs:
               git checkout -b main
               git push origin main
               git checkout dev
+            elif is_main_stub; then
+              echo "main is the auto-init stub; force-overwriting with seeded dev."
+              STUB_SHA=$(git ls-remote origin main | awk '{print $1}')
+              git push --force-with-lease=main:"$STUB_SHA" origin dev:main
             else
-              # main exists, so merge it into dev so dev is a superset, then push
+              # main has real history; merge it into dev so dev is a superset, then push.
               git fetch origin main
-              git merge origin/main --no-edit -m "merge: align dev with main before seed push"
-              git push origin dev
-              git push origin dev:main
+              if git merge origin/main --no-edit -m "merge: align dev with main before seed push"; then
+                git push origin dev
+                git push origin dev:main
+              else
+                git merge --abort 2>/dev/null || true
+                echo "::error::Cannot reconcile main and dev automatically. Resolve the merge by hand and re-run, or delete .github/workflows/harness-railway.yml and seed manually."
+                exit 1
+              fi
             fi
             echo "Seed commit pushed to dev and main"
           else
             echo "package.json already exists, skipping seed commit"
             # Dev has app code but main may not. serviceConnect (Step 3)
             # triggers a build from main, so sync dev to main now.
-            git fetch origin main 2>/dev/null || true
-            if git rev-parse --verify origin/main > /dev/null 2>&1; then
-              if ! git merge origin/main --no-edit -m "merge: align dev with main before Railway setup" 2>/dev/null; then
-                git merge --abort 2>/dev/null || true
-                echo "::warning::Could not automatically merge main into dev. Pushing dev content to main instead."
-              fi
+            if ! git ls-remote --exit-code origin main > /dev/null 2>&1; then
               git push origin HEAD:main
+            elif is_main_stub; then
+              echo "main is the auto-init stub; force-overwriting with dev."
+              STUB_SHA=$(git ls-remote origin main | awk '{print $1}')
+              git push --force-with-lease=main:"$STUB_SHA" origin HEAD:main
             else
-              git push origin HEAD:main
+              git fetch origin main
+              if git merge origin/main --no-edit -m "merge: align dev with main before Railway setup"; then
+                git push origin HEAD
+                git push origin HEAD:main
+              else
+                git merge --abort 2>/dev/null || true
+                echo "::error::main has real history that conflicts with dev. Reconcile manually (e.g. rebase dev onto main) and re-run."
+                exit 1
+              fi
             fi
             echo "Synced dev to main"
           fi
