@@ -1,4 +1,4 @@
-> Generated from `evolutionary-leadership/harness-forge@d9c8394`. Do not edit here. Edit in the source repo.
+> Generated from `evolutionary-leadership/harness-forge@eff10ec`. Do not edit here. Edit in the source repo.
 
 # harness-claude-github-railway
 
@@ -36,9 +36,17 @@ with your real app whenever you're ready.
   `SERVICE_REGION` in `.github/workflows/harness-railway.yml` and
   `.github/workflows/feature-branch-railway.yml`.
 - A `.claude/` directory with skills, hooks, and agents tuned for the
-  feature lifecycle and the Railway preview flow.
+  feature lifecycle and the Railway preview flow. Each push commits
+  the resulting Railway URL back to the feature branch as
+  `.railway-url`; if the post-push hook misses it (provisioning
+  outruns its budget, or the hook output is not visible to Claude),
+  re-fetch it on demand with
+  `bash .claude/scripts/get-railway-url.sh`.
 - GitHub Actions workflows that wrap the lifecycle and the Railway
-  preview lifecycle.
+  preview lifecycle. Concurrent pushes to the same `claude/...` branch
+  queue instead of cancelling, and the URL-publish step is idempotent
+  and self-healing, so stranded environments are recoverable on the
+  next workflow trigger.
 - A starting `claude-md-snippet.md` to paste into your project's
   `CLAUDE.md`, plus an `.env.example` listing the variables the
   starter expects.

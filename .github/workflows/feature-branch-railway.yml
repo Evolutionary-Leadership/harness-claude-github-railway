@@ -6,8 +6,11 @@ on:
     types: [completed]
 
 concurrency:
+  # Queue, do not cancel. Cancelling mid-run can interrupt a Railway
+  # GraphQL mutation between environmentCreate and the .railway-url
+  # commit, leaving a stranded environment with no published URL.
   group: railway-${{ github.event.workflow_run.head_branch }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   provision-railway:
@@ -17,6 +20,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      RAILWAY_ACCOUNT_TOKEN: ${{ secrets.RAILWAY_ACCOUNT_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+      # Keep in sync with harness-railway.yml. Railway forks default to
+      # US East unless every service-instance carries a region override.
+      SERVICE_REGION: europe-west4-drams3a
     steps:
       - name: Extract feature name from triggering branch
         id: feature
@@ -30,9 +39,6 @@ jobs:
       - name: Check if Railway environment already exists
         if: env.RAILWAY_ACCOUNT_TOKEN != '' && env.RAILWAY_PROJECT_ID != ''
         id: check
-        env:
-          RAILWAY_ACCOUNT_TOKEN: ${{ secrets.RAILWAY_ACCOUNT_TOKEN }}
-          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
         run: |
           FEATURE_NAME="${{ steps.feature.outputs.name }}"
           PROJECT_ID="$RAILWAY_PROJECT_ID"
@@ -53,19 +59,13 @@ jobs:
           fi
 
       - uses: actions/checkout@v6
-        if: steps.check.outputs.exists != 'true' && env.RAILWAY_ACCOUNT_TOKEN != '' && env.RAILWAY_PROJECT_ID != ''
+        if: env.RAILWAY_ACCOUNT_TOKEN != '' && env.RAILWAY_PROJECT_ID != ''
         with:
           ref: ${{ steps.feature.outputs.branch }}
           fetch-depth: 1
 
       - name: Create Railway environment and connect branch
         if: steps.check.outputs.exists != 'true' && env.RAILWAY_ACCOUNT_TOKEN != '' && env.RAILWAY_PROJECT_ID != ''
-        env:
-          RAILWAY_ACCOUNT_TOKEN: ${{ secrets.RAILWAY_ACCOUNT_TOKEN }}
-          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
-          # Keep in sync with harness-railway.yml. Railway forks default to
-          # US East unless every service-instance carries a region override.
-          SERVICE_REGION: europe-west4-drams3a
         run: |
           FEATURE_NAME="${{ steps.feature.outputs.name }}"
           FEATURE_BRANCH="${{ steps.feature.outputs.branch }}"
@@ -211,45 +211,115 @@ jobs:
             gql "mutation { serviceInstanceRedeploy(environmentId: \\\"$ENV_ID\\\", serviceId: \\\"$APP_SERVICE_ID\\\") }" || true
           fi
 
-          # 4. Get or create Railway domain for the app service only (reuses APP_SERVICE_ID from step 3b)
-          # environmentCreate duplicates dev's domain, so check for an
+          # 4. Eagerly ensure a service domain exists. The publish step
+          # below also does get-or-create, but seeding it here means the
+          # domain is reachable as soon as the deployment finishes.
+          # environmentCreate duplicates dev's domain, so we check for an
           # inherited domain before creating a new one to avoid duplicates.
-          DEPLOY_URL=""
           if [ -n "$APP_SERVICE_ID" ]; then
             EXISTING_DOMAIN=$(gql "query { domains(projectId: \\\"$PROJECT_ID\\\", environmentId: \\\"$ENV_ID\\\", serviceId: \\\"$APP_SERVICE_ID\\\") { serviceDomains { domain } } }" \
               | jq -r '.data.domains.serviceDomains[0].domain // empty' 2>/dev/null) || true
 
             if [ -n "$EXISTING_DOMAIN" ]; then
               echo "Using existing domain inherited from dev: $EXISTING_DOMAIN"
-              DOMAIN="$EXISTING_DOMAIN"
             else
-              DOMAIN_RESPONSE=$(gql "mutation { serviceDomainCreate(input: { serviceId: \\\"$APP_SERVICE_ID\\\", environmentId: \\\"$ENV_ID\\\" }) { domain } }") || true
-              DOMAIN=$(echo "$DOMAIN_RESPONSE" | jq -r '.data.serviceDomainCreate.domain // empty' 2>/dev/null) || true
-            fi
-
-            if [ -n "$DOMAIN" ]; then
-              DEPLOY_URL="https://$DOMAIN"
+              gql "mutation { serviceDomainCreate(input: { serviceId: \\\"$APP_SERVICE_ID\\\", environmentId: \\\"$ENV_ID\\\" }) { domain } }" >/dev/null || true
             fi
           fi
 
-          # 5. Commit the deployment URL
-          if [ -n "$DEPLOY_URL" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            echo "$DEPLOY_URL" > .railway-url
-            git add -f .railway-url
-            git commit -m "chore: add Railway preview URL"
-            # Pull before push in case Claude pushed more commits in the meantime
-            git pull --rebase origin "$FEATURE_BRANCH" 2>/dev/null || true
-            git push origin "$FEATURE_BRANCH" || \
-              echo "::warning::Could not push .railway-url. Fetch it manually: git fetch origin $FEATURE_BRANCH && git show origin/$FEATURE_BRANCH:.railway-url"
+      - name: Publish Railway preview URL to feature branch
+        # Always runs when secrets are present, regardless of whether the
+        # create step ran or was skipped (exists=true). Idempotent: no-op
+        # when .railway-url is already on the feature branch. This heals
+        # stranded environments left behind when an earlier run was
+        # cancelled mid-mutation or had its push rejected.
+        if: env.RAILWAY_ACCOUNT_TOKEN != '' && env.RAILWAY_PROJECT_ID != ''
+        run: |
+          FEATURE_NAME="${{ steps.feature.outputs.name }}"
+          FEATURE_BRANCH="${{ steps.feature.outputs.branch }}"
+          PROJECT_ID="$RAILWAY_PROJECT_ID"
+          API_URL="https://backboard.railway.com/graphql/v2"
+
+          # Fast-path idempotency: file already on the checked-out branch.
+          if [ -f .railway-url ] && [ -s .railway-url ]; then
+            echo "Already published: $(cat .railway-url)"
+            exit 0
           fi
+
+          gql() {
+            local resp
+            resp=$(curl -s -X POST "$API_URL" \
+              -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"query\":\"$1\"}") || true
+            if echo "$resp" | jq . >/dev/null 2>&1; then
+              echo "$resp"
+            else
+              echo '{"data":null}'
+            fi
+          }
+
+          # Look up the env id by feature name.
+          ENVS=$(gql "query { environments(projectId: \\\"$PROJECT_ID\\\") { edges { node { id name } } } }")
+          ENV_ID=$(echo "$ENVS" | jq -r ".data.environments.edges[].node | select(.name == \"$FEATURE_NAME\") | .id // empty" 2>/dev/null) || true
+          if [ -z "$ENV_ID" ]; then
+            echo "::warning::No Railway environment found for '$FEATURE_NAME'; create step likely failed. Skipping publish."
+            exit 0
+          fi
+
+          # Find the app service (filter out managed Postgres/storage).
+          SERVICES=$(gql "query { project(id: \\\"$PROJECT_ID\\\") { services { edges { node { id name } } } } }")
+          APP_SERVICE_ID=$(echo "$SERVICES" | jq -r '[.data.project.services.edges[].node | select(.name | test("postgres|db|storage"; "i") | not)][0].id // empty' 2>/dev/null) || true
+          if [ -z "$APP_SERVICE_ID" ]; then
+            echo "::warning::No app service found in project; skipping publish."
+            exit 0
+          fi
+
+          # Get-or-create the service domain. environmentCreate inherits
+          # dev's domain, so check first to avoid duplicates.
+          EXISTING_DOMAIN=$(gql "query { domains(projectId: \\\"$PROJECT_ID\\\", environmentId: \\\"$ENV_ID\\\", serviceId: \\\"$APP_SERVICE_ID\\\") { serviceDomains { domain } } }" \
+            | jq -r '.data.domains.serviceDomains[0].domain // empty' 2>/dev/null) || true
+          if [ -n "$EXISTING_DOMAIN" ]; then
+            DOMAIN="$EXISTING_DOMAIN"
+          else
+            DOMAIN_RESPONSE=$(gql "mutation { serviceDomainCreate(input: { serviceId: \\\"$APP_SERVICE_ID\\\", environmentId: \\\"$ENV_ID\\\" }) { domain } }") || true
+            DOMAIN=$(echo "$DOMAIN_RESPONSE" | jq -r '.data.serviceDomainCreate.domain // empty' 2>/dev/null) || true
+          fi
+          if [ -z "$DOMAIN" ]; then
+            echo "::warning::Could not get or create a Railway domain; skipping publish."
+            exit 0
+          fi
+          DEPLOY_URL="https://$DOMAIN"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "$DEPLOY_URL" > .railway-url
+          git add -f .railway-url
+          git commit -m "chore: add Railway preview URL"
+
+          # Retry-with-rebase loop. Survives concurrent Claude pushes and
+          # races with a queued earlier run that may publish first.
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "$FEATURE_BRANCH" || true
+            if git show "origin/$FEATURE_BRANCH:.railway-url" >/dev/null 2>&1; then
+              echo "Branch already has .railway-url (queued earlier run won the race)."
+              exit 0
+            fi
+            if git rebase "origin/$FEATURE_BRANCH"; then
+              if git push origin "HEAD:$FEATURE_BRANCH"; then
+                echo "Published $DEPLOY_URL"
+                exit 0
+              fi
+            else
+              git rebase --abort || true
+            fi
+            sleep $((attempt * 2))
+          done
+
+          echo "::warning::Could not push .railway-url after 5 attempts. Fetch it manually: git fetch origin $FEATURE_BRANCH && git show origin/$FEATURE_BRANCH:.railway-url"
 
       - name: Wait for Railway deployment
-        if: steps.check.outputs.exists != 'true' && env.RAILWAY_ACCOUNT_TOKEN != '' && env.RAILWAY_PROJECT_ID != ''
-        env:
-          RAILWAY_ACCOUNT_TOKEN: ${{ secrets.RAILWAY_ACCOUNT_TOKEN }}
-          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+        if: env.RAILWAY_ACCOUNT_TOKEN != '' && env.RAILWAY_PROJECT_ID != ''
         run: |
           FEATURE_NAME="${{ steps.feature.outputs.name }}"
           PROJECT_ID="$RAILWAY_PROJECT_ID"

@@ -50,7 +50,14 @@ work:
 git merge "origin/$FEATURE_BRANCH" --no-edit
 ```
 
-Fetch and display the Railway preview URL:
+Fetch and display the Railway preview URL. Prefer the helper, which
+polls and handles the not-yet-available case:
+
+```
+bash .claude/scripts/get-railway-url.sh "$FEATURE_BRANCH"
+```
+
+Or, for a single non-blocking read of an already-published URL:
 
 ```
 git show "origin/$FEATURE_BRANCH:.railway-url" 2>/dev/null || echo "URL not yet available"
@@ -106,11 +113,24 @@ the next step.
 **You MUST run this command** to get the Railway preview URL:
 
 ```
+bash .claude/scripts/get-railway-url.sh
+```
+
+The helper derives `feature/<name>` from the current `claude/` branch,
+polls until `.railway-url` is published, and prints the URL. If
+provisioning is still running when it returns empty, just re-run it; the
+publishing step is idempotent and self-healing, so a later run on the
+same branch will commit the missing URL.
+
+If you need the lower-level form (for example you already know the
+feature branch and just want a single read):
+
+```
 git fetch origin $FEATURE_BRANCH && git show origin/$FEATURE_BRANCH:.railway-url
 ```
 
 This is the primary way the user sees their preview URL. The post-push
-hook is unreliable. Always run this command and include the URL in your
+hook is unreliable. Always run the helper and include the URL in your
 summary.
 
 Summarize what was done and which files were changed. Include the Railway

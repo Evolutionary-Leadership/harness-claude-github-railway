@@ -145,8 +145,25 @@ is not always visible in your context. **After your final push, always
 manually fetch and include the Railway URL in your summary:**
 
 ```
+bash .claude/scripts/get-railway-url.sh
+```
+
+That helper polls the matching `feature/<name>` branch for `.railway-url`
+and prints it to stdout. The post-push hook delegates to the same script,
+so re-running it is the canonical recovery path when provisioning takes
+longer than the hook's ~80s budget. If you need the lower-level form
+(for example from a script that already knows the feature branch name):
+
+```
 git fetch origin feature/<name> && git show origin/feature/<name>:.railway-url
 ```
+
+The publishing step is idempotent and self-healing: even if an earlier
+run was cancelled mid-mutation, a later workflow trigger on the same
+branch will look up the existing Railway environment and commit the
+missing `.railway-url`. Concurrent pushes to the same `claude/...` branch
+queue instead of cancelling, so a fresh push never interrupts in-flight
+provisioning.
 
 ### 1. Starting a new feature
 

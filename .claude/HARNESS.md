@@ -92,7 +92,11 @@ reviewers: teammate1, teammate2
   a U+2014 em dash.
 - **PostToolUse (git push)**: Runs
   `.claude/hooks/post-push-railway-url.sh` after every `git push`, which
-  fetches and displays the Railway preview URL.
+  fetches and displays the Railway preview URL. The hook delegates its
+  fetch/poll loop to `.claude/scripts/get-railway-url.sh`, so any time
+  the URL is not yet available (provisioning runs longer than the hook's
+  ~80s budget, or hook output was not visible in context) you can re-run
+  the helper directly: `bash .claude/scripts/get-railway-url.sh`.
 
 ### Railway environments
 
@@ -105,7 +109,13 @@ Each feature gets a fully isolated Railway environment:
 - Deployed automatically when the feature branch is pushed
 - Cleaned up automatically (including Postgres and bucket) when the
   feature is merged
-- Preview URL stored in `.railway-url` on the feature branch
+- Preview URL stored in `.railway-url` on the feature branch. The
+  publishing step in `feature-branch-railway.yml` is idempotent (no-op
+  when `.railway-url` already exists) and self-healing: any future run
+  on a stranded branch will look up the existing environment and commit
+  the missing `.railway-url`. Concurrent pushes to the same `claude/...`
+  branch *queue* instead of cancelling, so a new push never interrupts
+  a Railway GraphQL mutation in flight.
 
 **Region default:** Services (app + Postgres) are pinned to **EU West
 (Amsterdam, `europe-west4-drams3a`)** by default so they co-locate with
@@ -204,7 +214,8 @@ These files are maintained by the harness and replaced on
 | `.github/workflows/feature-branch-cleanup.yml` | Fallback cleanup if a feature branch is deleted manually |
 | `.claude/scripts/session-start.sh` | Session startup hook |
 | `.claude/scripts/list-skills.sh` | Skill discovery script |
-| `.claude/hooks/post-push-railway-url.sh` | Fetches Railway preview URL after push |
+| `.claude/scripts/get-railway-url.sh` | On-demand Railway preview URL fetcher (polls; usable both from the post-push hook and as a manual recovery command) |
+| `.claude/hooks/post-push-railway-url.sh` | Runs after `git push`; delegates to `get-railway-url.sh` to fetch the Railway preview URL |
 | `.claude/hooks/prevent-em-dash.sh` | Blocks writes containing U+2014 em dashes |
 | `.claude/skills/getting-started/SKILL.md` | Orientation skill |
 | `.claude/skills/feature/SKILL.md` | `/feature` skill |
