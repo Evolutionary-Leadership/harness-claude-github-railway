@@ -440,7 +440,8 @@ jobs:
           echo ""
           echo "=== Step 4b: Create Object Storage bucket (production) ==="
           railref() { printf '\044'; printf '{'; printf '{%s}}' "$1"; }
-          curl -fsSL https://railway.com/install.sh | sh
+          curl -fsSL https://railway.com/install.sh | bash
+          export PATH="$HOME/.railway/bin:$PATH"
           export RAILWAY_API_TOKEN="$RAILWAY_ACCOUNT_TOKEN"
 
           BUCKET_CREATED=false
