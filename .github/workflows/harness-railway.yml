@@ -816,12 +816,12 @@ jobs:
 
               # Delete any claude/* and feature/* branches left over from
               # the bootstrap session. The first session does not call
-              # /mergedev (it runs the setup prompt via MCP on dev), so
-              # the session-start hook's init commit creates a stray
-              # feature/<name> branch that would otherwise leak. This
-              # workflow self-deletes after success, so it can only run
-              # during bootstrap, never against an established repo
-              # where these branches would represent real work.
+              # /mergedev (it runs the setup prompt via MCP on dev), so if
+              # it named a feature or pushed any code, the resulting
+              # feature/<name> branch would otherwise leak. This workflow
+              # self-deletes after success, so it can only run during
+              # bootstrap, never against an established repo where these
+              # branches would represent real work.
               git ls-remote --refs origin 'refs/heads/claude/*' 'refs/heads/feature/*' 2>/dev/null \
                 | awk '{print $2}' | sed 's|^refs/heads/||' | while read -r br; do
                   [ -z "$br" ] && continue

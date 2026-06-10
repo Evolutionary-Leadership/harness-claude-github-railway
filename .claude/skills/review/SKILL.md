@@ -19,10 +19,11 @@ with `review: true` in frontmatter so the workflow skips auto-merge.
 ### 1. Determine the feature name
 
     BRANCH=$(git branch --show-current)
-    # Strip claude/ prefix and -<sessionId> suffix
-    # e.g. claude/dark-mode-abc123 → dark-mode
+    FEATURE_NAME=$(bash .claude/scripts/resolve-feature-name.sh "$BRANCH")
+    FEATURE_BRANCH="feature/$FEATURE_NAME"
 
-Derive the feature branch name: `feature/<name>`.
+This prefers the slug in `.harness-feature` (set via `set-feature-name.sh`)
+and falls back to the random session codename, matching the workflows.
 
 ### 2. Gather all changes
 
@@ -49,9 +50,9 @@ it as the PR title. Otherwise, generate a concise title from the changes.
 
 Optionally read the `reviewers:` field from `.harness-version` and include it.
 
-Also include the Railway preview URL in the PR body so reviewers can test:
+Also include the Railway preview URL in the PR body so reviewers can test
+(using `$FEATURE_BRANCH` resolved in step 1):
 
-    FEATURE_BRANCH="feature/<name>"
     PREVIEW_URL=$(git show "origin/$FEATURE_BRANCH:.railway-url" 2>/dev/null || echo "")
 
 Format:

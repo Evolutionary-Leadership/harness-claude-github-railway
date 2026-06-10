@@ -9,17 +9,20 @@ allowed-tools: Bash(git *), Read
 
 Close out a `/chat` session by removing the orphaned branches that the
 session-start hook created. Refuses to run if the branches contain real
-work (anything beyond the `chore: initialize feature branch` commit).
+work (anything beyond the `chore: set feature name` or init commit).
 
 ## Why this skill exists
 
-When a session starts on a `claude/*` branch, the session-start hook
-unconditionally pushes a `chore: initialize feature branch` commit. That
-push triggers `claude-to-feature-branch.yml`, which creates `feature/<name>`
-from `dev` and deletes the source `claude/<name>` branch on the remote.
+Session start no longer pushes anything, so a session that never named a
+feature and never pushed leaves no branch behind, and this skill has nothing
+to do. A `feature/<name>` branch exists only if the `claude/` branch was
+pushed: either by `set-feature-name.sh` (the `chore: set feature name`
+commit) or by a code push. Pushing triggers `claude-to-feature-branch.yml`,
+which creates `feature/<name>` from `dev` and deletes the source
+`claude/<name>` branch on the remote.
 
-If the user only wanted to chat, that `feature/<name>` branch is now
-orphan cruft. This skill cleans it up.
+If that branch holds no real work (for example you named the feature, then
+decided to only chat), it is orphan cruft. This skill cleans it up.
 
 ## Steps
 
@@ -30,8 +33,7 @@ orphan cruft. This skill cleans it up.
 If `$BRANCH` does not start with `claude/`, tell the user this skill only
 runs on a `claude/` session branch, and stop.
 
-    WITHOUT_PREFIX="${BRANCH#claude/}"
-    FEATURE_NAME="${WITHOUT_PREFIX%-*}"
+    FEATURE_NAME=$(bash .claude/scripts/resolve-feature-name.sh "$BRANCH")
     FEATURE_BRANCH="feature/$FEATURE_NAME"
 
 ### 2. Refuse if there is uncommitted local work
@@ -56,6 +58,7 @@ with `dev`:
 
 The branch is "empty" if every line of `$COMMITS` matches one of:
 
+- `chore: set feature name (...)`
 - `chore: initialize feature branch (...)`
 - `chore: clean up stale signal file from previous merge`
 
@@ -70,7 +73,7 @@ Even if the branch looks empty, summarize what is about to happen and ask
 for confirmation before deleting anything:
 
     About to delete:
-      - remote: feature/<name>      (init commit only, safe)
+      - remote: feature/<name>      (name/init commit only, safe)
       - remote: claude/<name>-...   (if it still exists)
       - local: claude/<name>-...    (after switching to dev)
 

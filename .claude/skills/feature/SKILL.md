@@ -1,17 +1,19 @@
 ---
 name: feature
-description: Start working on a feature. Session startup already initializes the branch and Railway environment automatically; this skill is only needed if you want to explicitly name the task.
+description: Name this session's feature and load previous work. Derives a meaningful name from your description so the branch and Railway environment are created under it instead of the random codename.
 disable-model-invocation: true
 argument-hint: "<description of what to build>"
 ---
 
 # Feature
 
-Work on a feature. The session-start hook automatically initializes new
-feature branches (pushes an init commit, triggers Railway environment
-provisioning). This skill is a convenience wrapper; use it when you want
-to explicitly describe what to build, or as a fallback if auto-init was
-skipped.
+Name this session's feature from a description and make sure previous work is
+loaded. Naming is the important part: it sets `.harness-feature` so the GitHub
+Action creates `feature/<slug>` and provisions Railway under a meaningful name
+instead of the random session codename.
+
+Session startup no longer auto-initializes a feature branch; provisioning now
+happens on your first push. This skill makes that first push a well-named one.
 
 `$ARGUMENTS` contains the description of what to build.
 
@@ -26,77 +28,50 @@ BRANCH=$(git branch --show-current)
 If the branch does NOT start with `claude/`, tell the user this skill only
 works on `claude/` branches and stop.
 
-Derive the feature name:
+### 2. Name the feature
+
+Derive a short kebab-case slug from `$ARGUMENTS` (for example "fix the login
+seed bug" becomes `fix-login-seed`) and set it:
 
 ```
-# claude/dark-mode-abc123 → dark-mode → feature/dark-mode
-WITHOUT_PREFIX="${BRANCH#claude/}"
-FEATURE_NAME="${WITHOUT_PREFIX%-*}"
+bash .claude/scripts/set-feature-name.sh <slug>
+```
+
+This writes `.harness-feature`, commits it, and pushes, which triggers the
+GitHub Action to create `feature/<slug>` and provision Railway under that
+name. It is idempotent: if the name is already set to the same slug, it is a
+no-op.
+
+Resolve the canonical feature branch name for the rest of this skill:
+
+```
+FEATURE_NAME=$(bash .claude/scripts/resolve-feature-name.sh "$BRANCH")
 FEATURE_BRANCH="feature/$FEATURE_NAME"
 ```
 
-### 2. Ensure feature is initialized
+### 3. Pick up previous work (resume)
 
-Check if the feature branch already exists on the remote:
-
-```
-git fetch origin "$FEATURE_BRANCH" 2>/dev/null
-```
-
-**If it already exists**, merge it into the local branch to pick up previous
-work:
+If a feature branch already exists on the remote (a resumed session), merge it
+into the local branch to pick up previous work:
 
 ```
-git merge "origin/$FEATURE_BRANCH" --no-edit
+git fetch origin "$FEATURE_BRANCH" 2>/dev/null && git merge "origin/$FEATURE_BRANCH" --no-edit
 ```
 
-Fetch and display the Railway preview URL. Prefer the helper, which
-polls and handles the not-yet-available case:
-
-```
-bash .claude/scripts/get-railway-url.sh "$FEATURE_BRANCH"
-```
-
-Or, for a single non-blocking read of an already-published URL:
+Then show the Railway preview URL if one is already published:
 
 ```
 git show "origin/$FEATURE_BRANCH:.railway-url" 2>/dev/null || echo "URL not yet available"
 ```
 
-**If it does NOT exist**, check whether session-start already pushed an init
-commit by looking for `.harness-init`:
-
-```
-git log --oneline -1 --grep="initialize feature branch"
-```
-
-If no init commit exists, do the initialization now (fallback):
-
-```
-if [ -f ".pr-description.md" ]; then
-  git rm .pr-description.md
-  git commit -m "chore: clean up stale signal file from previous merge"
-fi
-
-git config user.name "claude-code[bot]" 2>/dev/null || true
-git config user.email "claude-code[bot]@users.noreply.github.com" 2>/dev/null || true
-date -u > .harness-init
-git add .harness-init
-git commit -m "chore: initialize feature branch ($FEATURE_NAME)"
-git push -u origin "$BRANCH"
-```
-
-If push fails, retry in the background (2s, 4s, 8s delays) so Claude can
-start working immediately.
-
-### 3. Do the work
+### 4. Do the work
 
 Execute everything described in `$ARGUMENTS`. This is the main phase: write
 code, create files, fix bugs, refactor, whatever the user asked for.
 
 Commit meaningful changes as you go with descriptive commit messages.
 
-### 4. Final push
+### 5. Final push
 
 After all work is complete, ensure everything is committed and pushed:
 
@@ -105,10 +80,10 @@ git push -u origin "$BRANCH"
 ```
 
 A PostToolUse hook will try to display the Railway preview URL, but hook
-output is often not visible in context. You MUST fetch it manually in
-the next step.
+output is often not visible in context. You MUST fetch it manually in the
+next step.
 
-### 5. Summary (REQUIRED, do not skip)
+### 6. Summary (REQUIRED, do not skip)
 
 **You MUST run this command** to get the Railway preview URL:
 
@@ -116,22 +91,14 @@ the next step.
 bash .claude/scripts/get-railway-url.sh
 ```
 
-The helper derives `feature/<name>` from the current `claude/` branch,
-polls until `.railway-url` is published, and prints the URL. If
-provisioning is still running when it returns empty, just re-run it; the
-publishing step is idempotent and self-healing, so a later run on the
-same branch will commit the missing URL.
+The helper resolves `feature/<name>` from the current `claude/` branch (slug
+from `.harness-feature`, else codename), polls until `.railway-url` is
+published, and prints the URL. If provisioning is still running when it
+returns empty, just re-run it; the publishing step is idempotent and
+self-healing, so a later run on the same branch will commit the missing URL.
 
-If you need the lower-level form (for example you already know the
-feature branch and just want a single read):
-
-```
-git fetch origin $FEATURE_BRANCH && git show origin/$FEATURE_BRANCH:.railway-url
-```
-
-This is the primary way the user sees their preview URL. The post-push
-hook is unreliable. Always run the helper and include the URL in your
-summary.
+This is the primary way the user sees their preview URL. The post-push hook is
+unreliable. Always run the helper and include the URL in your summary.
 
 Summarize what was done and which files were changed. Include the Railway
 preview URL. Mention the user can use `/mergedev` when ready to merge to dev.

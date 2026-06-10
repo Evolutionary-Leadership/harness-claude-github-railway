@@ -1,4 +1,4 @@
-> Generated from `evolutionary-leadership/harness-forge@e26cbd2`. Do not edit here. Edit in the source repo.
+> Generated from `evolutionary-leadership/harness-forge@7618c24`. Do not edit here. Edit in the source repo.
 
 # harness-claude-github-railway
 
@@ -44,12 +44,60 @@ with your real app whenever you're ready.
   `bash .claude/scripts/get-railway-url.sh`.
 - GitHub Actions workflows that wrap the lifecycle and the Railway
   preview lifecycle. Concurrent pushes to the same `claude/...` branch
-  queue instead of cancelling, and the URL-publish step is idempotent
-  and self-healing, so stranded environments are recoverable on the
+  queue instead of cancelling, and both the URL-publish step and the
+  deployment-trigger wiring are idempotent and self-healing, so
+  stranded or half-provisioned environments are recoverable on the
   next workflow trigger.
 - A starting `claude-md-snippet.md` to paste into your project's
   `CLAUDE.md`, plus an `.env.example` listing the variables the
   starter expects.
+
+## Branch flow (and where deploys actually run)
+
+```
+claude/<codename>-<id>  ← Claude Code pushes here (random codename)
+       ↓  Claude names the feature first: set-feature-name.sh writes .harness-feature
+       ↓  GitHub Actions: claude-to-feature-branch.yml
+       ↓  (merges into feature/<name>, deletes the claude/ branch)
+feature/<name>          ← provisioned once by GitHub Actions, then
+       ↓                  deployed on every push by Railway itself
+       ↓  /mergedev or /review
+dev → main
+```
+
+Feature branches and Railway environments are named after the work, not the
+random session codename. Claude derives a kebab-case slug from your task and
+runs `bash .claude/scripts/set-feature-name.sh <slug>` before its first push;
+that slug (stored in `.harness-feature`) becomes `feature/<name>`. If naming
+is skipped, the first push falls back to the codename. See `.claude/HARNESS.md`
+("Feature naming") for the resolver and fallback rules.
+
+A common point of confusion: once a feature is provisioned, **you will
+not see a GitHub Actions run on the `feature/` branch when it deploys**,
+and that is by design.
+
+- **GitHub Actions does the one-time provisioning only.**
+  `feature-branch-railway.yml` runs once (triggered off the `claude/`
+  push) to create the Railway environment and point Railway's deployment
+  trigger at `feature/<name>`.
+- **Every ongoing build and deploy is done by Railway's own GitHub
+  integration** watching `feature/<name>`. Those deploys appear in the
+  **Railway dashboard**, not as GitHub Actions runs.
+- **An empty "Check status" on a feature branch with no open PR is
+  expected.** CI (`feature-branch-checks.yml`) runs only on the PR to
+  `dev`/`main`. Pushes to `feature/**` are made with the default
+  `GITHUB_TOKEN`, which GitHub intentionally does not let trigger
+  downstream workflows.
+
+| Look for | Where |
+|----------|-------|
+| Provisioning trigger | `claude/` push → GitHub Actions tab |
+| Deploy branch | `feature/<name>` |
+| Ongoing deploys | Railway dashboard (Railway-native, not Actions) |
+| Preview URL | `.railway-url` on the feature branch (or `bash .claude/scripts/get-railway-url.sh`) |
+| CI checks | Only on the PR to `dev`/`main` |
+
+See `.claude/HARNESS.md` for the full mechanics.
 
 ## Provenance
 

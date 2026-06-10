@@ -32,7 +32,19 @@ jobs:
         run: |
           BRANCH="${{ github.event.workflow_run.head_branch }}"
           WITHOUT_PREFIX="${BRANCH#claude/}"
-          FEATURE_NAME="${WITHOUT_PREFIX%-*}"
+          CODENAME="${WITHOUT_PREFIX%-*}"
+          # This is a workflow_run job: the repo is not checked out yet and the
+          # claude/ branch may already be deleted by the bridge workflow. Read
+          # .harness-feature from the triggering commit via the contents API.
+          # Keep this validation identical to
+          # .claude/scripts/resolve-feature-name.sh and the other workflows.
+          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          SLUG="$(curl -fsS \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github.raw" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/.harness-feature?ref=$HEAD_SHA" \
+            2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+          if printf '%s' "$SLUG" | grep -Eq '^[a-z0-9][a-z0-9-]{0,40}$' && [ "$SLUG" != dev ] && [ "$SLUG" != main ]; then FEATURE_NAME="$SLUG"; else FEATURE_NAME="$CODENAME"; fi
           echo "name=$FEATURE_NAME" >> "$GITHUB_OUTPUT"
           echo "branch=feature/$FEATURE_NAME" >> "$GITHUB_OUTPUT"
 
@@ -72,30 +84,39 @@ jobs:
           PROJECT_ID="$RAILWAY_PROJECT_ID"
           API_URL="https://backboard.railway.com/graphql/v2"
 
+          # POST a raw JSON payload, retrying when the response is not
+          # valid JSON. Slow mutations (environmentCreate forks the whole
+          # dev environment and can take over a minute) sometimes come
+          # back with a malformed body even though they succeeded
+          # server-side; a single bad response must not be trusted.
+          gql_post() {
+            local payload="$1" resp
+            for _try in 1 2 3; do
+              resp=$(curl -s --max-time 120 -X POST "$API_URL" \
+                -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "$payload") || true
+              if echo "$resp" | jq . >/dev/null 2>&1; then
+                echo "$resp"
+                return 0
+              fi
+              sleep 5
+            done
+            echo '{"data":null}'
+          }
+
           gql() {
-            local resp
-            resp=$(curl -s -X POST "$API_URL" \
-              -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"query\":\"$1\"}") || true
-            if echo "$resp" | jq . >/dev/null 2>&1; then
-              echo "$resp"
-            else
-              echo '{"data":null}'
-            fi
+            gql_post "{\"query\":\"$1\"}"
           }
 
           set_service_region() {
             local svc_id="$1"
             local env_id="$2"
-            curl -s -X POST "$API_URL" \
-              -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "$(jq -n \
-                --arg sid "$svc_id" \
-                --arg eid "$env_id" \
-                --arg region "$SERVICE_REGION" \
-                '{query: "mutation($sid: String!, $eid: String!, $region: String!) { serviceInstanceUpdate(serviceId: $sid, environmentId: $eid, input: { region: $region }) }", variables: {sid: $sid, eid: $eid, region: $region}}')" > /dev/null || true
+            gql_post "$(jq -n \
+              --arg sid "$svc_id" \
+              --arg eid "$env_id" \
+              --arg region "$SERVICE_REGION" \
+              '{query: "mutation($sid: String!, $eid: String!, $region: String!) { serviceInstanceUpdate(serviceId: $sid, environmentId: $eid, input: { region: $region }) }", variables: {sid: $sid, eid: $eid, region: $region}}')" > /dev/null || true
           }
 
           # 1. Get the dev environment ID
@@ -112,13 +133,36 @@ jobs:
 
           ENV_ID=$(echo "$CREATE_RESPONSE" | jq -r '.data.environmentCreate.id // empty')
           if [ -z "$ENV_ID" ]; then
-            echo "Warning: Environment creation may have failed or already exists"
-            echo "$CREATE_RESPONSE" | jq .
-            exit 0
+            # The create response can be malformed even though the
+            # environment WAS created server-side (with dev's deployment
+            # trigger still pointing at dev). Exiting 0 here would skip
+            # the trigger update, region pin, and variable wiring, and
+            # the preview would silently serve dev code. Poll for the
+            # environment by name and continue provisioning once found.
+            echo "environmentCreate returned no id; polling for environment '$FEATURE_NAME'..."
+            echo "$CREATE_RESPONSE" | jq . || true
+            for i in 1 2 3 4 5 6; do
+              sleep 10
+              ENVS=$(gql "query { environments(projectId: \\\"$PROJECT_ID\\\") { edges { node { id name } } } }")
+              ENV_ID=$(echo "$ENVS" | jq -r ".data.environments.edges[].node | select(.name == \"$FEATURE_NAME\") | .id // empty")
+              if [ -n "$ENV_ID" ]; then
+                echo "Found environment '$FEATURE_NAME' ($ENV_ID) on poll $i/6."
+                break
+              fi
+              echo "Environment '$FEATURE_NAME' not visible yet (poll $i/6)."
+            done
+            if [ -z "$ENV_ID" ]; then
+              echo "::error::Railway environment '$FEATURE_NAME' was not created: environmentCreate returned no id and the environment did not appear after 60s of polling."
+              exit 1
+            fi
           fi
 
-          # 3. Update each deployment trigger to point to the feature branch
-          TRIGGER_IDS=$(echo "$CREATE_RESPONSE" | jq -r '.data.environmentCreate.deploymentTriggers.edges[].node.id')
+          # 3. Update each deployment trigger to point to the feature
+          # branch. Query the triggers by environment id instead of
+          # reading them from the create response, which may have been
+          # malformed (see the polling fallback above).
+          TRIGGERS=$(gql "query { environment(id: \\\"$ENV_ID\\\") { deploymentTriggers { edges { node { id branch } } } } }")
+          TRIGGER_IDS=$(echo "$TRIGGERS" | jq -r '.data.environment.deploymentTriggers.edges[].node.id // empty')
           for TRIGGER_ID in $TRIGGER_IDS; do
             gql "mutation { deploymentTriggerUpdate(id: \\\"$TRIGGER_ID\\\", input: { branch: \\\"$FEATURE_BRANCH\\\" }) { id } }"
           done
@@ -159,15 +203,12 @@ jobs:
 
           if [ -n "$APP_SERVICE_ID" ]; then
             # Wire DATABASE_URL (Postgres supports cross-service references)
-            curl -s -X POST "$API_URL" \
-              -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "$(jq -n \
-                --arg pid "$PROJECT_ID" \
-                --arg eid "$ENV_ID" \
-                --arg sid "$APP_SERVICE_ID" \
-                --arg dbref "$PG_REF" \
-                '{query: "mutation($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }", variables: {input: {projectId: $pid, environmentId: $eid, serviceId: $sid, variables: {"DATABASE_URL": $dbref}}}}')" > /dev/null
+            gql_post "$(jq -n \
+              --arg pid "$PROJECT_ID" \
+              --arg eid "$ENV_ID" \
+              --arg sid "$APP_SERVICE_ID" \
+              --arg dbref "$PG_REF" \
+              '{query: "mutation($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }", variables: {input: {projectId: $pid, environmentId: $eid, serviceId: $sid, variables: {"DATABASE_URL": $dbref}}}}')" > /dev/null
             echo "Set DATABASE_URL on app service for feature environment"
 
             # Wire bucket credentials via reference variables.
@@ -181,19 +222,16 @@ jobs:
               SECRETKEY_REF=$(railref "${STORAGE_SVC_NAME}.SECRET_ACCESS_KEY")
               REGION_REF=$(railref "${STORAGE_SVC_NAME}.REGION")
 
-              curl -s -X POST "$API_URL" \
-                -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "$(jq -n \
-                  --arg pid "$PROJECT_ID" \
-                  --arg eid "$ENV_ID" \
-                  --arg sid "$APP_SERVICE_ID" \
-                  --arg bucket "$BUCKET_REF" \
-                  --arg endpoint "$ENDPOINT_REF" \
-                  --arg accesskey "$ACCESSKEY_REF" \
-                  --arg secretkey "$SECRETKEY_REF" \
-                  --arg region "$REGION_REF" \
-                  '{query: "mutation($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }", variables: {input: {projectId: $pid, environmentId: $eid, serviceId: $sid, variables: {"AWS_S3_BUCKET_NAME": $bucket, "AWS_ENDPOINT_URL": $endpoint, "AWS_ACCESS_KEY_ID": $accesskey, "AWS_SECRET_ACCESS_KEY": $secretkey, "AWS_DEFAULT_REGION": $region}}}}')" > /dev/null
+              gql_post "$(jq -n \
+                --arg pid "$PROJECT_ID" \
+                --arg eid "$ENV_ID" \
+                --arg sid "$APP_SERVICE_ID" \
+                --arg bucket "$BUCKET_REF" \
+                --arg endpoint "$ENDPOINT_REF" \
+                --arg accesskey "$ACCESSKEY_REF" \
+                --arg secretkey "$SECRETKEY_REF" \
+                --arg region "$REGION_REF" \
+                '{query: "mutation($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }", variables: {input: {projectId: $pid, environmentId: $eid, serviceId: $sid, variables: {"AWS_S3_BUCKET_NAME": $bucket, "AWS_ENDPOINT_URL": $endpoint, "AWS_ACCESS_KEY_ID": $accesskey, "AWS_SECRET_ACCESS_KEY": $secretkey, "AWS_DEFAULT_REGION": $region}}}}')" > /dev/null
               echo "Set bucket credentials on app service for feature environment"
             fi
           fi
@@ -227,6 +265,76 @@ jobs:
             fi
           fi
 
+      - name: Repoint deployment triggers to feature branch (heal)
+        # Always runs when secrets are present, regardless of whether the
+        # create step ran or was skipped (exists=true), analogous to the
+        # URL publish heal below. environmentCreate forks dev's deployment
+        # trigger, so a half-provisioned environment (older harness
+        # versions, or a create run that died between environmentCreate
+        # and deploymentTriggerUpdate) keeps serving dev code while
+        # looking healthy. Any trigger not pointing at feature/<name> is
+        # repointed here, followed by a redeploy of the app service so
+        # the running deployment matches the connected branch. Idempotent:
+        # no-op when all triggers already point at the feature branch.
+        if: env.RAILWAY_ACCOUNT_TOKEN != '' && env.RAILWAY_PROJECT_ID != ''
+        run: |
+          FEATURE_NAME="${{ steps.feature.outputs.name }}"
+          FEATURE_BRANCH="${{ steps.feature.outputs.branch }}"
+          PROJECT_ID="$RAILWAY_PROJECT_ID"
+          API_URL="https://backboard.railway.com/graphql/v2"
+
+          # Same retry-hardened helper as the create step: never trust a
+          # single malformed response from a slow Railway mutation.
+          gql_post() {
+            local payload="$1" resp
+            for _try in 1 2 3; do
+              resp=$(curl -s --max-time 120 -X POST "$API_URL" \
+                -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "$payload") || true
+              if echo "$resp" | jq . >/dev/null 2>&1; then
+                echo "$resp"
+                return 0
+              fi
+              sleep 5
+            done
+            echo '{"data":null}'
+          }
+
+          gql() {
+            gql_post "{\"query\":\"$1\"}"
+          }
+
+          ENVS=$(gql "query { environments(projectId: \\\"$PROJECT_ID\\\") { edges { node { id name } } } }")
+          ENV_ID=$(echo "$ENVS" | jq -r ".data.environments.edges[].node | select(.name == \"$FEATURE_NAME\") | .id // empty" 2>/dev/null) || true
+          if [ -z "$ENV_ID" ]; then
+            echo "::warning::No Railway environment found for '$FEATURE_NAME'; nothing to heal."
+            exit 0
+          fi
+
+          TRIGGERS=$(gql "query { environment(id: \\\"$ENV_ID\\\") { deploymentTriggers { edges { node { id branch } } } } }")
+          STALE_IDS=$(echo "$TRIGGERS" | jq -r --arg b "$FEATURE_BRANCH" '.data.environment.deploymentTriggers.edges[].node | select(.branch != $b) | .id' 2>/dev/null) || true
+          if [ -z "$STALE_IDS" ]; then
+            echo "All deployment triggers already point at $FEATURE_BRANCH."
+            exit 0
+          fi
+
+          for TRIGGER_ID in $STALE_IDS; do
+            gql "mutation { deploymentTriggerUpdate(id: \\\"$TRIGGER_ID\\\", input: { branch: \\\"$FEATURE_BRANCH\\\" }) { id } }" > /dev/null
+            echo "Repointed deployment trigger $TRIGGER_ID to $FEATURE_BRANCH"
+          done
+
+          # The stale trigger means the current deployment was built from
+          # the wrong branch; redeploy the app service so the running code
+          # matches. Postgres and storage are managed services that do not
+          # pull from git, so only the app service needs it.
+          SERVICES=$(gql "query { project(id: \\\"$PROJECT_ID\\\") { services { edges { node { id name } } } } }")
+          APP_SERVICE_ID=$(echo "$SERVICES" | jq -r '[.data.project.services.edges[].node | select(.name | test("postgres|db|storage"; "i") | not)][0].id // empty' 2>/dev/null) || true
+          if [ -n "$APP_SERVICE_ID" ]; then
+            gql "mutation { serviceInstanceRedeploy(environmentId: \\\"$ENV_ID\\\", serviceId: \\\"$APP_SERVICE_ID\\\") }" > /dev/null || true
+            echo "Redeployed app service from $FEATURE_BRANCH"
+          fi
+
       - name: Publish Railway preview URL to feature branch
         # Always runs when secrets are present, regardless of whether the
         # create step ran or was skipped (exists=true). Idempotent: no-op
@@ -246,17 +354,22 @@ jobs:
             exit 0
           fi
 
+          # Same retry-hardened helper as the create step: never trust a
+          # single malformed response from a slow Railway mutation.
           gql() {
             local resp
-            resp=$(curl -s -X POST "$API_URL" \
-              -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"query\":\"$1\"}") || true
-            if echo "$resp" | jq . >/dev/null 2>&1; then
-              echo "$resp"
-            else
-              echo '{"data":null}'
-            fi
+            for _try in 1 2 3; do
+              resp=$(curl -s --max-time 120 -X POST "$API_URL" \
+                -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"query\":\"$1\"}") || true
+              if echo "$resp" | jq . >/dev/null 2>&1; then
+                echo "$resp"
+                return 0
+              fi
+              sleep 5
+            done
+            echo '{"data":null}'
           }
 
           # Look up the env id by feature name.
@@ -325,17 +438,22 @@ jobs:
           PROJECT_ID="$RAILWAY_PROJECT_ID"
           API_URL="https://backboard.railway.com/graphql/v2"
 
+          # Same retry-hardened helper as the create step: never trust a
+          # single malformed response from a slow Railway mutation.
           gql() {
             local resp
-            resp=$(curl -s -X POST "$API_URL" \
-              -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"query\":\"$1\"}") || true
-            if echo "$resp" | jq . >/dev/null 2>&1; then
-              echo "$resp"
-            else
-              echo '{"data":null}'
-            fi
+            for _try in 1 2 3; do
+              resp=$(curl -s --max-time 120 -X POST "$API_URL" \
+                -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"query\":\"$1\"}") || true
+              if echo "$resp" | jq . >/dev/null 2>&1; then
+                echo "$resp"
+                return 0
+              fi
+              sleep 5
+            done
+            echo '{"data":null}'
           }
 
           # Find the environment ID for this feature

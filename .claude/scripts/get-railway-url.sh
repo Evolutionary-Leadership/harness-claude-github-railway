@@ -23,8 +23,8 @@ if [[ -z "$FEATURE_BRANCH" ]]; then
     echo "Usage: $0 [feature/<name>]" >&2
     exit 0
   fi
-  WITHOUT_PREFIX="${BRANCH#claude/}"
-  FEATURE_NAME="${WITHOUT_PREFIX%-*}"
+  SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)
+  FEATURE_NAME=$(bash "$SCRIPT_DIR/resolve-feature-name.sh" "$BRANCH")
   FEATURE_BRANCH="feature/$FEATURE_NAME"
 fi
 

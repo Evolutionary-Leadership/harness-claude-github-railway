@@ -161,25 +161,34 @@ git fetch origin feature/<name> && git show origin/feature/<name>:.railway-url
 The publishing step is idempotent and self-healing: even if an earlier
 run was cancelled mid-mutation, a later workflow trigger on the same
 branch will look up the existing Railway environment and commit the
-missing `.railway-url`. Concurrent pushes to the same `claude/...` branch
-queue instead of cancelling, so a fresh push never interrupts in-flight
-provisioning.
+missing `.railway-url`. The deployment trigger is healed the same way:
+every provisioning run repoints any trigger still targeting `dev` at
+`feature/<name>` and redeploys the app service, so a half-provisioned
+environment never silently serves dev code on the preview URL.
+Concurrent pushes to the same `claude/...` branch queue instead of
+cancelling, so a fresh push never interrupts in-flight provisioning.
 
 ### 1. Starting a new feature
 
-Every new chat on a `claude/` branch is automatically treated as a new
-feature, no `/feature` prefix needed. Just describe what you want to build.
+Every new chat on a `claude/` branch is treated as a new feature, no
+`/feature` prefix needed. Just describe what you want to build.
 
-On session start, the harness automatically:
-1. Pushes an init commit to trigger the GitHub Action
-2. The Action derives the feature name (strip `claude/` prefix and
-   `-<sessionId>` suffix), creates `feature/<name>` from dev, and creates a
-   Railway environment duplicated from dev (including its own Postgres
-   instance and bucket)
-3. The Railway preview URL appears automatically after each push
+The session branch starts with a random codename
+(`claude/<adjective-scientist>-<id>`). Before the first push, Claude names
+the feature so the branch and Railway environment describe the work:
 
-You can still use `/feature <description>` explicitly if you prefer, but
-it's no longer required.
+1. Claude derives a short kebab-case slug from your task and runs
+   `bash .claude/scripts/set-feature-name.sh <slug>`. This writes
+   `.harness-feature`, commits it, and pushes.
+2. That push triggers the GitHub Action, which resolves the feature name
+   (the slug in `.harness-feature`, or the codename if it is missing),
+   creates `feature/<name>` from dev, and creates a Railway environment
+   duplicated from dev (its own Postgres instance and bucket).
+3. The Railway preview URL appears automatically after each push.
+
+If naming is skipped, the first code push still works: the feature branch
+and Railway environment fall back to the random codename. You can also use
+`/feature <description>` explicitly to name and start in one step.
 
 ### 2. Pushing code
 
@@ -255,11 +264,12 @@ Run `/getting-started` to see all skills, or use these directly:
 - `/deps`: handle Dependabot PRs
 - `/continue`: resume in-progress feature
 - `/rollback`: revert bad deploy
-- `/chat`: think and brainstorm without modifying the repo (the session-start
-  hook still creates an empty `feature/<name>` branch on GitHub; pair with
-  `/endchat` to clean up)
+- `/chat`: think and brainstorm without modifying the repo (a pure chat
+  session pushes nothing, so it usually leaves no `feature/<name>` branch to
+  clean up; only run `/endchat` if the session pushed at some point)
 - `/endchat`: clean up after `/chat` (deletes the orphaned `feature/<name>`
-  branch and switches local back to `dev`)
+  branch left behind by a session that pushed, and switches local back to
+  `dev`)
 
 ## Dependency management
 

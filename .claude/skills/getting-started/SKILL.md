@@ -16,6 +16,28 @@ You have **skills** and **agents** available in this project.
 
 They exist because someone already figured out the right way to do these things.
 
+## Step 0: Name this session's feature branch
+
+If this session is going to change code, give it a meaningful name BEFORE
+your first push. The session branch starts with a random codename
+(`claude/<adjective-scientist>-<id>`); without a name, the feature branch
+and Railway environment inherit that random codename instead of describing
+the work.
+
+Derive a short kebab-case slug from what the user asked for (for example
+"fix the login seed bug" becomes `fix-login-seed`), then run:
+
+    bash .claude/scripts/set-feature-name.sh <slug>
+
+This writes `.harness-feature`, commits it, and pushes, which triggers the
+GitHub Action to create `feature/<slug>` and provision Railway under that
+name. Run it once, early. It is idempotent and a no-op off a `claude/`
+branch.
+
+**Skip this** for read-only or question-only sessions (there is nothing to
+push). If you forget, the fallback is graceful: the first push just uses
+the random codename.
+
 ## Step 1: Discover your skills and agents
 
 Run this now:

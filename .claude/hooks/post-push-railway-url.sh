@@ -18,15 +18,16 @@ if [[ ! "$BRANCH" == claude/* ]]; then
   exit 0
 fi
 
-# Derive feature branch name: claude/dark-mode-abc123 -> feature/dark-mode
-WITHOUT_PREFIX="${BRANCH#claude/}"
-FEATURE_NAME="${WITHOUT_PREFIX%-*}"
+# Resolve the feature branch name: prefer the slug in .harness-feature, else
+# fall back to the random session codename. Shared resolver keeps this in
+# agreement with the workflows and get-railway-url.sh.
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)
+FEATURE_NAME=$(bash "$SCRIPT_DIR/../scripts/resolve-feature-name.sh" "$BRANCH")
 FEATURE_BRANCH="feature/$FEATURE_NAME"
 
 # Delegate the fetch/poll/read to the on-demand helper. Keeping all
 # polling logic in one place means the user can re-query later with
 # the same script when provisioning runs longer than this hook's budget.
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)
 URL=$(bash "$SCRIPT_DIR/../scripts/get-railway-url.sh" "$FEATURE_BRANCH" 2>/dev/null || true)
 
 if [[ -z "$URL" ]]; then

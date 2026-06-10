@@ -17,22 +17,65 @@ and synced from there into this template repo on every harness release.
 ### Branch naming drives everything
 
 ```
-claude/<feature>-<sessionId>   ← you work here
+claude/<codename>-<sessionId>  ← you work here (random codename)
+       ↓ first push: slug commit from set-feature-name.sh, or any code push
        ↓ (GitHub Action)
-feature/<feature>              ← created automatically from dev
+feature/<name>                 ← created automatically from dev
        ↓                         + Railway env + Postgres + Bucket provisioned
        ↓ (/mergedev)
 dev                            ← PR auto-merged
                                  Railway env + Postgres + Bucket cleaned up
 ```
 
+- The session branch starts with a random codename
+  (`claude/<adjective-scientist>-<id>`). To get a meaningful name, Claude
+  runs `bash .claude/scripts/set-feature-name.sh <slug>` as its first
+  action; it writes `.harness-feature` and pushes.
+- The feature name is resolved as: use the slug in `.harness-feature` if
+  present and valid, otherwise fall back to the codename (the `claude/`
+  prefix and `-<sessionId>` suffix stripped). See "Feature naming" below.
 - Pushing to a `claude/` branch triggers the Action that creates/updates
-  the corresponding `feature/` branch.
-- The feature name is derived by stripping the `claude/` prefix and
-  `-<sessionId>` suffix: `claude/dark-mode-abc123` → `feature/dark-mode`.
+  the corresponding `feature/<name>` branch.
 - Each feature branch gets its own isolated Railway environment with a
   dedicated PostgreSQL instance and S3-compatible bucket, duplicated from
   dev.
+
+### Feature naming
+
+Feature branches and Railway environments are named after the work, not the
+random session codename. The mechanism:
+
+- **Source of truth:** a committed file `.harness-feature` holding a
+  kebab-case slug. Claude sets it early via
+  `bash .claude/scripts/set-feature-name.sh <slug>`, which sanitizes the
+  input, writes the file, commits, and pushes.
+- **Resolution (everywhere):** use the slug if `.harness-feature` is
+  present and valid (`^[a-z0-9][a-z0-9-]{0,40}$`, and not `dev` or `main`),
+  otherwise fall back to the codename. The shared resolver is
+  `.claude/scripts/resolve-feature-name.sh`; the three workflows
+  (`claude-to-feature-branch.yml`, `claude-mergedev.yml`,
+  `feature-branch-railway.yml`) apply the identical check.
+- **Slug-first, not rename-later:** the slug is set BEFORE the first push,
+  so the feature branch and Railway environment are created with the good
+  name from the start (Railway has no clean environment rename). The early
+  build head start is preserved because the slug commit IS the first push.
+- **Graceful fallback:** if `set-feature-name.sh` is never called, the first
+  code push still creates `feature/<codename>` and provisions Railway under
+  the codename. Naming is an improvement, never a requirement.
+- **No leak to dev:** `.harness-feature` is removed by the mergedev workflow
+  before the merge, so a future session cloned from dev never inherits a
+  stale name. For this reason `.harness-feature` must stay out of
+  `.gitignore` (the workflows read it from the commit).
+
+**Where do I look for X:**
+
+| What | Where |
+|------|-------|
+| Provisioning trigger | A `claude/` push (the slug commit, or first code push) |
+| Deploy branch | `feature/<name>` |
+| Ongoing deploys | Railway dashboard (Railway-native, not GitHub Actions) |
+| CI checks | Only on the PR to `dev`/`main` |
+| Current feature name | `bash .claude/scripts/resolve-feature-name.sh` |
 
 ### Signal files
 
@@ -47,6 +90,13 @@ dev                            ← PR auto-merged
   a GitHub Release. The `/release` skill writes this file.
 - **`.railway-url`**: Written by the GitHub Action to the feature branch.
   Contains the Railway preview URL for this feature's environment.
+- **`.harness-feature`**: A committed one-line kebab-case slug naming this
+  feature, written by `set-feature-name.sh`. The workflows and shell
+  scripts resolve the feature name from it (with a codename fallback). It
+  is removed before the merge to dev (by `claude-mergedev.yml`) so the name
+  never leaks onto dev and into the next session. Unlike the other signal
+  files it must stay tracked (not in `.gitignore`), because the workflows
+  read it from the commit.
 
 ### `.harness-version` configuration
 
@@ -82,11 +132,13 @@ reviewers: teammate1, teammate2
 ### Hooks
 
 - **SessionStart**: Runs `.claude/scripts/session-start.sh` on every new
-  session. On a `claude/` branch, it automatically initializes the
-  feature: if the feature branch exists, it merges previous work; if not,
-  it pushes an init commit to trigger the GitHub Action (creates feature
-  branch + Railway environment). This means `/feature` is no longer
-  required to start a new chat, just describe what you want to build.
+  session. On a `claude/` branch, it resolves the feature name and, if a
+  matching `feature/<name>` branch already exists, merges previous work and
+  shows the Railway URL. It no longer pushes an init commit: a fresh
+  session just prints naming guidance. Provisioning happens on Claude's
+  first push, ideally the `set-feature-name.sh` slug commit (see "Feature
+  naming"). You do not need `/feature` to start; just describe what you
+  want to build and Claude names the session before its first push.
 - **PreToolUse (Write/Edit/Bash)**: Runs
   `.claude/hooks/prevent-em-dash.sh`, which blocks any write that contains
   a U+2014 em dash.
@@ -116,6 +168,62 @@ Each feature gets a fully isolated Railway environment:
   the missing `.railway-url`. Concurrent pushes to the same `claude/...`
   branch *queue* instead of cancelling, so a new push never interrupts
   a Railway GraphQL mutation in flight.
+- Deployment triggers are self-healing too: every provisioning run
+  re-checks the environment's deployment triggers and repoints any that
+  still target `dev` at `feature/<name>`, then redeploys the app service
+  so the running code matches the connected branch. This repairs
+  half-provisioned environments (e.g. when `environmentCreate` returned
+  a malformed response mid-fork) that would otherwise silently serve dev
+  code on the preview URL.
+
+**Why no GitHub Actions run shows up on the `feature/` branch.** This
+trips up almost everyone the first time, so it's worth stating plainly:
+the `feature/` branch is wired to Railway, but it does **not** run
+GitHub Actions on every deploy. There are two distinct actors, and only
+one of them is GitHub Actions:
+
+1. **One-time provisioning (GitHub Actions).**
+   `feature-branch-railway.yml` runs **once**, triggered indirectly off
+   the `claude/` push (via `workflow_run: completed` of the
+   "Create feature branch & merge claude/ into it" bridge workflow,
+   gated on `startsWith(head_branch, 'claude/')`). It checks out
+   `feature/<name>`, creates the Railway environment (duplicated from
+   `dev`), points the Railway **deployment trigger** at the
+   `feature/<name>` branch, wires `DATABASE_URL` and bucket credentials,
+   and publishes `.railway-url`. That is the *entire* GitHub Actions
+   involvement in feature deploys.
+2. **Every ongoing build and deploy (Railway, not Actions).** Once the
+   trigger points at `feature/<name>`, **Railway's own GitHub
+   integration** watches that branch and rebuilds/redeploys on each new
+   commit. These deploys run inside Railway and show up in the **Railway
+   dashboard** (project → the feature's environment → Deployments). They
+   never appear as GitHub Actions runs, because GitHub Actions is not
+   what triggers them.
+
+Two consequences that look like bugs but are expected:
+
+- **No `workflow_run` on `feature/` pushes.** The bridge workflow pushes
+  to `feature/**` using the default `GITHUB_TOKEN`. GitHub deliberately
+  does **not** trigger downstream workflows from `GITHUB_TOKEN` pushes
+  (this prevents recursive workflow loops), so even if a workflow were
+  listening on `push: feature/**`, it would not fire. The Railway
+  provisioning is reached via `workflow_run` off the bridge precisely to
+  work around this.
+- **An empty "Check status" on the feature branch is normal.**
+  `feature-branch-checks.yml` runs only on `pull_request` to `dev`/`main`.
+  A `feature/` branch with no open PR has nothing to report, so a blank
+  or "expected" check status there is not a misconfiguration; CI runs
+  when you open the PR (via `/mergedev` or `/review`), not before.
+
+**Where do I look for X:**
+
+| What | Where it happens |
+|------|------------------|
+| Provisioning trigger | A `claude/` push (bridge workflow, then `workflow_run`); GitHub Actions tab |
+| Deploy branch | `feature/<name>` (the Railway deployment trigger points here) |
+| Ongoing builds/deploys | **Railway dashboard**, the feature's environment (Railway-native, not Actions) |
+| Preview URL | `.railway-url` on the `feature/` branch, or `bash .claude/scripts/get-railway-url.sh` |
+| CI checks | Only on the PR to `dev`/`main` (`feature-branch-checks.yml`), not on the feature branch itself |
 
 **Region default:** Services (app + Postgres) are pinned to **EU West
 (Amsterdam, `europe-west4-drams3a`)** by default so they co-locate with
@@ -214,6 +322,8 @@ These files are maintained by the harness and replaced on
 | `.github/workflows/feature-branch-cleanup.yml` | Fallback cleanup if a feature branch is deleted manually |
 | `.claude/scripts/session-start.sh` | Session startup hook |
 | `.claude/scripts/list-skills.sh` | Skill discovery script |
+| `.claude/scripts/resolve-feature-name.sh` | Resolves the feature name (slug from `.harness-feature`, else session codename); shared by the hooks, scripts, and workflows |
+| `.claude/scripts/set-feature-name.sh` | Names the session's feature: sanitizes a slug, writes `.harness-feature`, commits, and pushes to trigger provisioning |
 | `.claude/scripts/get-railway-url.sh` | On-demand Railway preview URL fetcher (polls; usable both from the post-push hook and as a manual recovery command) |
 | `.claude/hooks/post-push-railway-url.sh` | Runs after `git push`; delegates to `get-railway-url.sh` to fetch the Railway preview URL |
 | `.claude/hooks/prevent-em-dash.sh` | Blocks writes containing U+2014 em dashes |
@@ -263,9 +373,10 @@ After pushing the cleanup commit, the same step also retires the
 one-time-use `RAILWAY_WORKSPACE_ID` repo variable (if it was set) and
 deletes any stray `claude/*` and `feature/*` branches left over from
 the bootstrap session. The bootstrap session does not run `/mergedev`,
-so the session-start hook's init commit can leave a `feature/<name>`
-branch behind that nothing else cleans up; doing it here keeps a
-freshly bootstrapped repo tidy. Because the workflow self-deletes
+so if it named a feature (via `set-feature-name.sh`) or pushed any
+code, the resulting `feature/<name>` branch would leak with nothing
+else to clean it up; doing it here keeps a freshly bootstrapped repo
+tidy. Because the workflow self-deletes
 beforehand, this branch cleanup can only ever run during first-repo
 bootstrap, never against an established repo where those branches
 would represent real work.

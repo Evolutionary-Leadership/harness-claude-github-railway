@@ -17,12 +17,13 @@ handles PR creation and auto-merge.
 ### 1. Determine the feature name
 
     BRANCH=$(git branch --show-current)
-    # Strip claude/ prefix and -<sessionId> suffix
-    # e.g. claude/dark-mode-abc123 → dark-mode
+    FEATURE_NAME=$(bash .claude/scripts/resolve-feature-name.sh "$BRANCH")
+    FEATURE_BRANCH="feature/$FEATURE_NAME"
 
-Derive the feature branch name: `feature/<name>`.
+This prefers the slug in `.harness-feature` (set via `set-feature-name.sh`)
+and falls back to the random session codename, matching the workflows.
 
-### 2. Gather all changes
+### 2. Gather all changes and sync with dev
 
 Fetch and diff against dev to understand what's being merged:
 
@@ -37,6 +38,33 @@ Also check if a `feature/<name>` branch exists and include its commits:
 
 Review ALL changes (not just the latest commit) to write an accurate PR
 description.
+
+**Pre-empt merge conflicts with dev.** The workflow merges this branch into
+`dev` through the PR; if `dev` has advanced in a conflicting way, the PR cannot
+merge and the workflow leaves it open. Merge `dev` into the current branch now
+so any conflict surfaces here, where you can resolve it, instead of stalling the
+PR:
+
+    git merge origin/dev --no-edit
+
+If the merge succeeds cleanly, continue. If it reports conflicts, **resolve
+them yourself on a best-effort basis** rather than aborting:
+
+- List the conflicted files: `git diff --name-only --diff-filter=U`.
+- For each one, reconcile the two sides so both this feature's intent and the
+  incoming `dev` changes are preserved. Do not blindly discard either side.
+- For generated, lock, or signal files, prefer the `dev` version.
+- Stage the resolved files and finish the merge:
+
+      git add -A
+      git commit --no-edit
+
+After resolving, **remember what you changed**: in your final message to the
+user (step 6) note which files conflicted and how you resolved each one. A clean
+merge needs no mention; only report conflicts you actually had to resolve. If a
+conflict is genuinely ambiguous and you cannot resolve it safely (e.g. two
+incompatible intents in the same hunk), stop and ask the user instead of
+guessing.
 
 ### 3. Run docs-updater agent
 
@@ -77,8 +105,15 @@ Format:
 
 ### 5. Commit and push
 
-`.pr-description.md` is in `.gitignore` (it is a signal file, never committed
-to dev/main). The `-f` flag is required to stage it on the `claude/` branch.
+Push any pending feature work **first**, so the whole branch (including the
+conflict resolution from step 2) is on the remote before the signal file
+triggers the workflow:
+
+    git push -u origin <current-branch>
+
+Then add the signal file as its own commit and push it. `.pr-description.md`
+is in `.gitignore` (it is a signal file, never committed to dev/main), so the
+`-f` flag is required to stage it on the `claude/` branch:
 
     git add -f .pr-description.md
     git commit -m "chore: trigger auto-merge to dev"
@@ -89,8 +124,10 @@ to dev/main). The `-f` flag is required to stage it on the `claude/` branch.
 Tell the user:
 - The auto-merge has been triggered
 - The GitHub Action will create a PR from `feature/<name>` → `dev` and merge it
-- If there are merge conflicts, the PR will be left open with resolution
-  instructions
+- Any conflicts with `dev` were already resolved locally in step 2; report
+  which files conflicted and how you resolved them. The PR should now merge
+  cleanly. (If the workflow still cannot merge, it leaves a comment on the PR
+  with manual resolution steps.)
 - The feature branch will be cleaned up automatically
 - They can stay in this chat and chain `/release` once the merge lands. The
   release skill works on `dev` and never re-pushes the `claude/` branch, so

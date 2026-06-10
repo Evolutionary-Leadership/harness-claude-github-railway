@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Auto-initialize feature branches on session start.
-# If the feature branch exists, merge previous work. If not, push an init
-# commit to trigger the GitHub Action (creates feature branch + Railway env).
+# Resume previous work on session start.
+# Feature provisioning now happens on Claude's FIRST push: either the slug
+# commit from .claude/scripts/set-feature-name.sh (preferred) or any first
+# code push (falls back to the random codename). So this hook no longer
+# pushes an init commit. It only resumes work when a feature branch already
+# exists for this session's resolved name.
 BRANCH=$(git branch --show-current 2>/dev/null || echo "")
 if [[ "$BRANCH" == claude/* ]]; then
-  WITHOUT_PREFIX="${BRANCH#claude/}"
-  FEATURE_NAME="${WITHOUT_PREFIX%-*}"
+  SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)
+  FEATURE_NAME=$(bash "$SCRIPT_DIR/resolve-feature-name.sh" "$BRANCH")
   FEATURE_BRANCH="feature/$FEATURE_NAME"
 
   if git fetch origin "$FEATURE_BRANCH" 2>/dev/null; then
@@ -28,37 +31,15 @@ if [[ "$BRANCH" == claude/* ]]; then
       echo "=========================================="
     fi
   else
-    # Feature branch doesn't exist yet: auto-initialize
-    echo "Auto-initializing feature: $FEATURE_NAME"
-
-    # Clean up stale signal files from a previous /mergedev
-    if [ -f ".pr-description.md" ]; then
-      git rm .pr-description.md
-      git commit -m "chore: clean up stale signal file from previous merge"
-    fi
-
-    # Configure git identity
-    git config user.name "claude-code[bot]" 2>/dev/null || true
-    git config user.email "claude-code[bot]@users.noreply.github.com" 2>/dev/null || true
-
-    # Create init commit (real file change required; paths-ignore skips empty commits)
-    date -u > .harness-init
-    git add .harness-init
-    git commit -m "chore: initialize feature branch ($FEATURE_NAME)"
-
-    # Push once; retry in background if needed (don't block Claude)
-    if git push -u origin "$BRANCH" 2>&1; then
-      echo "Pushed to $BRANCH; Railway environment is being provisioned."
-    else
-      (
-        for delay in 2 4 8; do
-          sleep "$delay"
-          git push -u origin "$BRANCH" 2>/dev/null && exit 0
-        done
-      ) &>/dev/null &
-      disown 2>/dev/null || true
-      echo "Push retrying in background. Railway environment will be provisioned shortly."
-    fi
+    # No feature branch yet: fresh session. Do NOT push here.
+    # Provisioning happens on the first push (see getting-started Step 0).
+    echo "Fresh session on $BRANCH (no feature branch yet)."
+    echo "Name this feature before your first push so the branch and Railway"
+    echo "environment are created with a meaningful name:"
+    echo "  bash .claude/scripts/set-feature-name.sh <slug>"
+    echo "If you skip it, the first push falls back to the random codename"
+    echo "($FEATURE_NAME). Skip naming entirely for read-only or question-only"
+    echo "sessions."
   fi
 fi
 

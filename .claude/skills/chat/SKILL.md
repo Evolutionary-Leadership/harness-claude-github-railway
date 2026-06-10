@@ -16,22 +16,20 @@ push, or deploy.
 
 ## What about the branch the session started on?
 
-The session-start hook runs *before* this skill is invoked. If the local
-branch is `claude/*`, that hook has already:
+The session-start hook no longer pushes anything. A pure `/chat` session
+that never names a feature and never pushes creates no `feature/<name>`
+branch on GitHub, so there is usually nothing to clean up afterward.
 
-1. Created a `chore: initialize feature branch` commit with `.harness-init`
-2. Pushed it, which triggered `claude-to-feature-branch.yml` to create
-   `feature/<name>` from `dev` and delete the `claude/<name>` branch on the
-   remote.
+A `feature/<name>` branch only appears if the `claude/` branch gets pushed.
+In chat mode that does not happen: this skill makes no commits or pushes and
+does not run `set-feature-name.sh`. So in the common case you can skip
+`/endchat` entirely.
 
-So by the time `/chat` starts, an empty `feature/<name>` branch already
-exists on GitHub. That is harmless during the conversation, but if the user
-ends the session without merging, that branch becomes orphan cruft.
-
-**When the user is done chatting, run `/endchat`** to delete the orphaned
-branches. Mention this once at the start of the conversation, and again
-when the user signals they are wrapping up ("thanks", "that's all", "ok
-got it", etc.).
+**Only if a `feature/<name>` branch was created this session** (for example
+you pushed before switching into chat) does it become orphan cruft. In that
+case, run `/endchat` to delete it. Mention this once when the user signals
+they are wrapping up ("thanks", "that's all", "ok got it"), but do not nag
+about it in a session that pushed nothing.
 
 ## Rules
 
@@ -70,10 +68,13 @@ considered; push back when an idea has hidden costs.
 
 ## Wrapping up
 
-When the user indicates the chat is over, do not just say goodbye. Remind
-them once:
+When the user indicates the chat is over, just wrap up. Because a pure chat
+session pushes nothing, there is normally no orphaned branch and no
+`/endchat` needed.
 
-> When you are done, run `/endchat` to delete the orphaned `feature/<name>`
-> branch on GitHub. Otherwise it will sit around as cruft.
+Only if this session created a `feature/<name>` branch (it pushed at some
+point) should you remind the user once:
+
+> Run `/endchat` to delete the orphaned `feature/<name>` branch on GitHub.
 
 Do not run `/endchat` yourself. The user invokes it.
