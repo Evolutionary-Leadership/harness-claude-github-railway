@@ -225,19 +225,37 @@ Two consequences that look like bugs but are expected:
 | Preview URL | `.railway-url` on the `feature/` branch, or `bash .claude/scripts/get-railway-url.sh` |
 | CI checks | Only on the PR to `dev`/`main` (`feature-branch-checks.yml`), not on the feature branch itself |
 
-**Region default:** Services (app + Postgres) are pinned to **EU West
-(Amsterdam, `europe-west4-drams3a`)** by default so they co-locate with
-the object-storage bucket (`BUCKET_REGION: ams`). Without this pin,
-Railway places new services in US East (Virginia), which puts the app
-and Postgres on the opposite side of the Atlantic from the bucket.
-The pin is applied by `feature-branch-railway.yml` (for feature
-environments) and the one-time `harness-railway.yml` (for production
-and dev). To switch regions, change the `SERVICE_REGION` env var at the
-top of both workflows; valid values are listed in Railway's
+**Region default:** Every service in every environment (production, dev,
+and every feature branch) defaults to **EU West (Amsterdam)**; nothing
+lands in a US region. All three services are covered:
+
+- **App + Postgres** are pinned to `europe-west4-drams3a` via the
+  `SERVICE_REGION` env var. Without this pin, Railway places new services
+  in US East (Virginia), on the opposite side of the Atlantic from the
+  bucket. The pin is applied by the one-time `harness-railway.yml` (for
+  production and dev) and by `feature-branch-railway.yml`, which pins both
+  on first provision *and* in an always-run "Pin service region to Europe
+  and redeploy" step so an environment that already existed (older
+  harness, or a create run that died early) still gets corrected.
+- **The object-storage bucket** is created in the `ams` region via the
+  `BUCKET_REGION` env var. Only `harness-railway.yml` creates buckets
+  (for production and dev). Feature environments fork the dev environment,
+  so every feature bucket *inherits* the dev bucket's `ams` region. The
+  bucket is **not** addressable through `project.services`, so
+  `feature-branch-railway.yml` cannot read or re-pin a feature bucket's
+  region; the dev bucket is the durable control. A bucket also cannot be
+  moved after creation, so a dev bucket in `ams` is what guarantees every
+  feature bucket is in `ams`.
+
+To switch regions, change **both** knobs in **both** workflows so they
+stay in sync: `SERVICE_REGION` (app + Postgres) and `BUCKET_REGION`
+(bucket). Valid `SERVICE_REGION` values come from Railway's
 `serviceInstanceUpdate` GraphQL docs (e.g. `us-east4-eqdc4a`,
-`asia-southeast1-eqsg3a`). Existing services do not migrate
-automatically; changing `SERVICE_REGION` only affects services created
-after the change.
+`asia-southeast1-eqsg3a`). Existing services do **not** migrate
+automatically; changing either value only affects services created after
+the change, and a bucket already created cannot be moved at all.
+**After a `/harness-upgrade`, re-check both values**: an upgrade can
+overwrite these harness-managed workflows and reset the region defaults.
 
 **Database migrations:** Each feature environment starts with an empty
 database. Your migration tooling must handle creating tables from scratch.
@@ -261,7 +279,10 @@ to bail out early on production.
 Use any S3-compatible client library. Each environment's bucket is
 completely isolated, with no cross-contamination between feature, dev,
 and production. Buckets are created in the `ams` (Amsterdam) region by
-default, matching the EU West service region pin described above.
+default (the `BUCKET_REGION` knob), matching the EU West service region
+pin (`SERVICE_REGION`) described above. Production and dev buckets are
+created directly; feature buckets inherit `ams` from the forked dev
+bucket and cannot be re-pinned per feature (see "Region default").
 
 ## Managed trait files
 

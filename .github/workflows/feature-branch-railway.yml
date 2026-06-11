@@ -26,6 +26,14 @@ jobs:
       # Keep in sync with harness-railway.yml. Railway forks default to
       # US East unless every service-instance carries a region override.
       SERVICE_REGION: europe-west4-drams3a
+      # Single visible knob for the object-storage bucket region. Feature
+      # buckets are NOT created here: they are inherited from the dev
+      # environment's bucket (which harness-railway.yml creates in this
+      # region), because Object Storage is not addressable via
+      # project.services and a bucket cannot be moved after creation. This
+      # value is surfaced for documentation/parity with harness-railway.yml
+      # and is referenced by the region-pin step's warning output.
+      BUCKET_REGION: ams
     steps:
       - name: Extract feature name from triggering branch
         id: feature
@@ -333,6 +341,113 @@ jobs:
           if [ -n "$APP_SERVICE_ID" ]; then
             gql "mutation { serviceInstanceRedeploy(environmentId: \\\"$ENV_ID\\\", serviceId: \\\"$APP_SERVICE_ID\\\") }" > /dev/null || true
             echo "Redeployed app service from $FEATURE_BRANCH"
+          fi
+
+      - name: Pin service region to Europe and redeploy
+        # Always runs when secrets are present, regardless of whether the
+        # create step ran or was skipped (exists=true), analogous to the
+        # trigger-repoint and URL-publish heal steps. The create step pins
+        # the region only on first provision; an environment that already
+        # existed (older harness, or a create run that died before its
+        # region pin) would otherwise keep whatever region it was forked
+        # with. serviceInstanceUpdate is an idempotent config write, so
+        # re-pinning an already-correct service is a no-op; the app is
+        # redeployed only when its region actually had to change.
+        #
+        # Bucket note: Railway Object Storage is NOT addressable via
+        # project.services, so a feature bucket's region cannot be read or
+        # re-pinned here. Feature buckets inherit their region from the dev
+        # environment's bucket, which harness-railway.yml creates in
+        # BUCKET_REGION (ams). A bucket cannot be moved after creation, so
+        # the dev bucket is the durable control for bucket region; this
+        # step governs only the app + Postgres services. We deliberately
+        # ship no untested storage-region mutation here. See
+        # claude/HARNESS.md "Region default".
+        if: env.RAILWAY_ACCOUNT_TOKEN != '' && env.RAILWAY_PROJECT_ID != ''
+        run: |
+          FEATURE_NAME="${{ steps.feature.outputs.name }}"
+          PROJECT_ID="$RAILWAY_PROJECT_ID"
+          API_URL="https://backboard.railway.com/graphql/v2"
+
+          # Same retry-hardened helper as the create step: never trust a
+          # single malformed response from a slow Railway mutation.
+          gql_post() {
+            local payload="$1" resp
+            for _try in 1 2 3; do
+              resp=$(curl -s --max-time 120 -X POST "$API_URL" \
+                -H "Authorization: Bearer $RAILWAY_ACCOUNT_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "$payload") || true
+              if echo "$resp" | jq . >/dev/null 2>&1; then
+                echo "$resp"
+                return 0
+              fi
+              sleep 5
+            done
+            echo '{"data":null}'
+          }
+
+          gql() {
+            gql_post "{\"query\":\"$1\"}"
+          }
+
+          set_service_region() {
+            local svc_id="$1"
+            local env_id="$2"
+            gql_post "$(jq -n \
+              --arg sid "$svc_id" \
+              --arg eid "$env_id" \
+              --arg region "$SERVICE_REGION" \
+              '{query: "mutation($sid: String!, $eid: String!, $region: String!) { serviceInstanceUpdate(serviceId: $sid, environmentId: $eid, input: { region: $region }) }", variables: {sid: $sid, eid: $eid, region: $region}}')" > /dev/null || true
+          }
+
+          ENVS=$(gql "query { environments(projectId: \\\"$PROJECT_ID\\\") { edges { node { id name } } } }")
+          ENV_ID=$(echo "$ENVS" | jq -r ".data.environments.edges[].node | select(.name == \"$FEATURE_NAME\") | .id // empty" 2>/dev/null) || true
+          if [ -z "$ENV_ID" ]; then
+            echo "::warning::No Railway environment found for '$FEATURE_NAME'; cannot pin region."
+            exit 0
+          fi
+
+          SERVICES=$(gql "query { project(id: \\\"$PROJECT_ID\\\") { services { edges { node { id name } } } } }")
+          APP_SERVICE_ID=$(echo "$SERVICES" | jq -r '[.data.project.services.edges[].node | select(.name | test("postgres|db|storage"; "i") | not)][0].id // empty' 2>/dev/null) || true
+          PG_SVC_ID=$(echo "$SERVICES" | jq -r '[.data.project.services.edges[].node | select(.name | test("db|postgres"; "i"))][0].id // empty' 2>/dev/null) || true
+
+          # Read the current per-instance region so we only redeploy the app
+          # when the region actually has to change. If the query field is
+          # unavailable (schema drift) the read returns empty, and we fall
+          # back to pinning + redeploying, which is the safe default.
+          INSTANCES=$(gql "query { environment(id: \\\"$ENV_ID\\\") { serviceInstances { edges { node { serviceId region } } } } }")
+          APP_REGION=$(echo "$INSTANCES" | jq -r --arg sid "$APP_SERVICE_ID" '.data.environment.serviceInstances.edges[].node | select(.serviceId == $sid) | .region // empty' 2>/dev/null) || true
+          PG_REGION=$(echo "$INSTANCES" | jq -r --arg sid "$PG_SVC_ID" '.data.environment.serviceInstances.edges[].node | select(.serviceId == $sid) | .region // empty' 2>/dev/null) || true
+
+          APP_CHANGED=false
+          if [ -n "$APP_SERVICE_ID" ] && [ "$APP_REGION" != "$SERVICE_REGION" ]; then
+            set_service_region "$APP_SERVICE_ID" "$ENV_ID"
+            echo "Pinned app service region to $SERVICE_REGION (feature env '$FEATURE_NAME', was '${APP_REGION:-unknown}')"
+            APP_CHANGED=true
+          elif [ -n "$APP_SERVICE_ID" ]; then
+            echo "App service already in $SERVICE_REGION (feature env '$FEATURE_NAME'); no change."
+          fi
+
+          if [ -n "$PG_SVC_ID" ] && [ "$PG_REGION" != "$SERVICE_REGION" ]; then
+            set_service_region "$PG_SVC_ID" "$ENV_ID"
+            echo "Pinned Postgres region to $SERVICE_REGION (feature env '$FEATURE_NAME', was '${PG_REGION:-unknown}')"
+          elif [ -n "$PG_SVC_ID" ]; then
+            echo "Postgres already in $SERVICE_REGION (feature env '$FEATURE_NAME'); no change."
+          fi
+
+          # Object Storage is not in project.services, so the feature
+          # bucket's region cannot be verified or re-pinned here. It is
+          # inherited from the dev bucket (created in BUCKET_REGION=$BUCKET_REGION)
+          # and cannot be moved after creation.
+          echo "Bucket region inherited from dev (BUCKET_REGION=$BUCKET_REGION); not re-pinnable per feature."
+
+          # A region change only takes effect on the next deployment, so
+          # redeploy the app when its region changed. Postgres and storage
+          # are managed services that do not pull from git.
+          if [ "$APP_CHANGED" = true ] && [ -n "$APP_SERVICE_ID" ]; then
+            gql "mutation { serviceInstanceRedeploy(environmentId: \\\"$ENV_ID\\\", serviceId: \\\"$APP_SERVICE_ID\\\") }" > /dev/null || true
+            echo "Redeployed app service so the new region takes effect."
           fi
 
       - name: Publish Railway preview URL to feature branch
