@@ -65,7 +65,7 @@ jobs:
 
       - name: Setup Node.js
         if: steps.config.outputs.cmd != '' && steps.pm.outputs.manager != '' && steps.pm.outputs.manager != 'bun'
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ steps.node.outputs.version }}
           cache: ${{ steps.pm.outputs.cache }}
