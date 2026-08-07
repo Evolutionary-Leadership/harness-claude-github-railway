@@ -1,4 +1,4 @@
-> Generated from `evolutionary-leadership/harness-forge@66d00a0`. Do not edit here. Edit in the source repo.
+> Generated from `evolutionary-leadership/harness-forge@b9d1791`. Do not edit here. Edit in the source repo.
 
 # harness-claude-github-railway
 

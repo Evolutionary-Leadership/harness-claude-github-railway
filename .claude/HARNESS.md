@@ -118,16 +118,20 @@ reviewers: teammate1, teammate2
 - **`repo`**: the upstream forge repo (`evolutionary-leadership/harness-forge`),
   which hosts `VERSION`, `migrations/`, and `stacks/traits/`.
 - **`check`**: CI command to run on PRs to dev. When configured, the
-  `feature-branch-checks.yml` workflow runs this command, and mergedev
-  uses `gh pr merge --auto` to wait for checks.
+  `feature-branch-checks.yml` workflow runs this command (also on every
+  push to a `claude/**` branch, for feedback before the merge PR exists),
+  and mergedev polls the run's conclusion on the PR head, merging only on
+  success. The check chain must finish within the gate's 12-minute budget.
 - **`reviewers`**: Default reviewers assigned when using `/review`.
 - **`traits`**: stack-specific best-practice files installed under
   `.claude/traits/` and managed by `/harness-upgrade`.
 
 **Prerequisites for CI checks:**
-- Enable "Allow auto-merge" in GitHub repo settings (Settings → General)
-- Add a branch protection rule for `dev` requiring the "check" status check
-- Optionally add the same for `main` to gate releases and hotfixes
+- None: the merge gate polls the check run directly, so it works without
+  branch protection (unavailable on private free-plan repos, where
+  auto-merge would silently degrade to an immediate merge)
+- Optionally add a branch protection rule for `main` with required status
+  checks to gate releases and hotfixes
 
 ### Hooks
 

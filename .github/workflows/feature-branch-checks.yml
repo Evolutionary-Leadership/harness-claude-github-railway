@@ -1,8 +1,30 @@
 name: Feature branch checks
 
+# Checks run on two triggers:
+# - push to claude/** gives the session CI feedback while the work is in
+#   flight, before any merge PR exists. The trigger is on claude/** and not
+#   feature/**, because feature/** is pushed by claude-to-feature-branch.yml
+#   with the default GITHUB_TOKEN, and events created with GITHUB_TOKEN do
+#   not start workflows. Signal-file-only pushes are skipped; the merge PR
+#   run covers them.
+# - pull_request to dev/main is the merge gate: claude-mergedev.yml waits
+#   for this run's conclusion before merging when a check: command is
+#   configured in .harness-version.
+# The 'check' job id below is a contract with claude-mergedev.yml's merge
+# gate, which polls the run by that name; do not rename it.
 on:
+  push:
+    branches: ['claude/**']
+    paths-ignore:
+      - '.pr-description.md'
+      - '.harness-init'
+      - '.harness-feature'
   pull_request:
     branches: [dev, main]
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
