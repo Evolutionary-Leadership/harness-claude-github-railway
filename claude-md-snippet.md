@@ -27,8 +27,81 @@ stack, delete all three files and update `railway.json`'s `startCommand`
 and `watchPatterns` for your runtime; nothing in the harness will pull
 the starter back.
 
+## Documentation model
+
+**`CLAUDE.md` is a router, not an encyclopedia.** Nearly every reader of this
+repo's docs is an AI agent starting a fresh session with no memory, and this
+file is the only part that loads automatically, on every session, whether or
+not the session needs it. Its budget is **300 lines**.
+
+This file holds only: conventions, one-way decisions, the definition of done,
+the don't-touch list, writing rules, and the map below. **If you are adding a
+catalog section here (a list of routes, tools, tables, env vars, or
+components), it belongs in `docs/architecture/`, not here.** Detail is
+retrieved on demand, not preloaded.
+
+### Map: which doc to read for which work
+
+| Working on | Read |
+|---|---|
+| Anything, first | `docs/README.md` (the index-manifest: every doc, what it owns) |
+| A subsystem's routes, tools, tables, or jobs | `docs/architecture/<subsystem>.md` |
+| The database, bucket, migrations, seed data, or preview URL | `docs/architecture/railway-environments.md` |
+| Why something is built this way | `docs/decisions/` (numbered ADRs) |
+| An operational procedure or incident | `docs/runbooks/` |
+| What a domain term means | `docs/GLOSSARY.md` |
+| Auth, secrets, limits, untrusted input | `docs/SECURITY.md` |
+| Where a new test goes, what CI skips | `docs/TESTING.md` |
+
+Rules that hold it together:
+
+- **One home per fact.** When a fact moves, delete the old copy in the same
+  commit. Two plausible answers to the same question is the failure this
+  layout exists to prevent.
+- **Code is truth for WHAT, docs for WHY and WHERE.** Restating code is a
+  defect, not thoroughness.
+- **Accepted ADRs are append-only.** Supersede, never rewrite. Leave an
+  `ADR NNNN` comment in the module a decision governs so grep reaches the
+  rationale from the code.
+- **Historical docs are frozen.** Corrections to a retrospective or handoff
+  go in as bracketed dated additions. A fully superseded doc is deleted, not
+  archived: git history is the archive.
+- **Freshness is mechanical.** `node scripts/check-docs.mjs` fails on broken
+  links, unindexed docs, `sources:` globs matching nothing, dangling ADR
+  references, and surface tables whose row count no longer matches the code.
+
+Run `/document` to write an ADR, audit the diff, or find where a fact goes.
+
+## Definition of done
+
+A change is done when the code works **and** its owning doc is updated in the
+same commit:
+
+| You changed | Update |
+|---|---|
+| A migration or schema | The data-model doc in `docs/architecture/` |
+| A route, tool, command, or event | That subsystem's surface table |
+| An environment variable | `.env.example`, with a comment |
+| An invariant others must respect | `CLAUDE.md`, plus an ADR when the tradeoff is not obvious |
+| A domain term | `docs/GLOSSARY.md` |
+| Auth, secrets, limits, input trust | `docs/SECURITY.md` |
+| A test tier, runner, or convention | `docs/TESTING.md` |
+| Any new doc file | A row in `docs/README.md` |
+
+A cosmetic refactor (rename, extract, reformat) needs **no** doc change.
+Documenting it would restate what the code already says.
+
 ## Writing rules
 
+For prose aimed at agent readers:
+
+- Lead with the invariant or the trap, not with narrative
+- Never restate what the code says
+- Name files and exports in backticks with every claim
+- Prefer short tables to paragraphs
+- Keep grep anchors stable (ADR ids, glossary terms, headings). Renaming a
+  heading breaks a future session's search
+- When a fact moves, leave no copy behind
 - Never use em dashes (U+2014). Use commas, colons, semicolons, or parentheses instead. A PreToolUse hook will block any write containing an em dash
 
 ## Avoiding stream timeouts
@@ -60,141 +133,71 @@ The full lifecycle from idea to merged feature is automated. Railway
 environments are created automatically by GitHub Actions so the feature
 is deployable from the first push.
 
-### Database
+### Railway environments
 
-Every Railway environment (production, dev, and each feature branch) gets
-its own isolated PostgreSQL instance. The `DATABASE_URL` environment variable
-is automatically wired to the app service via a Railway reference variable
-(`${{Postgres.DATABASE_URL}}`). Your app just reads `DATABASE_URL`, so no
-manual connection string configuration needed.
+Every environment (production, dev, and one per feature branch) gets its own
+isolated PostgreSQL instance, S3-compatible bucket, and app service. The
+mechanics are a catalog, so they live in
+[`docs/architecture/railway-environments.md`](docs/architecture/railway-environments.md).
+Read it before touching the database, the bucket, migrations, seed data, or
+the preview URL. What you need in every session:
 
-**Migrations:** Database migrations run automatically on deploy via the
-`railway.json` startCommand. It detects your ORM (Drizzle or Prisma) and
-runs the appropriate migration command before starting the app. Each feature
-environment starts with an empty database, so all migrations run from
-scratch. Dev and production only run new (pending) migrations.
+- Read `DATABASE_URL` and the `AWS_*` bucket variables from the environment.
+  Never build a connection string or hard-code a bucket name.
+- A feature environment's database starts **empty**; dev and production only
+  run pending migrations. Use expand-and-contract for breaking schema changes.
+- Production is never seeded: honour `SEED_DATA=false` at the top of any seed
+  script.
+- **After your final push, fetch and include the Railway preview URL in your
+  summary:** `bash .claude/scripts/get-railway-url.sh`. Hook output is not
+  always visible in your context.
+- Provisioning is self-healing. If an environment looks half-created, push
+  again rather than repairing it by hand.
 
-**How migrations flow through branches:**
+### 0. Say what kind of session this is
 
-| Environment | DB state | What happens on deploy |
-|---|---|---|
-| Feature branch | Empty (fresh) | All migrations run from first to latest |
-| Dev | Persistent | Only new migrations from merged feature run |
-| Main/Production | Persistent | Only new migrations from release run |
+Every session starts by stating its flavor explicitly; if you do not,
+Claude asks before doing anything else:
 
-**Safe schema changes:** For breaking changes (renaming columns, changing
-types), use the expand-and-contract pattern: add the new column alongside
-the old one, migrate data, update code, then drop the old column in a
-separate migration. See your database trait (`.claude/traits/`) for details.
+- **`/chat`**: talk it through, nothing is written.
+- **`/brainstorm <topic>`**: a relentless interview to stress-test an
+  idea. Writes to the issue tracker only, never the repo; ends in
+  nothing, an idea issue, or straight into `/feature`.
+- **`/feature <description>`** (or `/feature #<idea-issue>`): build it,
+  through the gated flow below.
 
-**Migration conflicts:** When two feature branches both modify the schema,
-merging them will produce a git conflict in the migration journal file.
-This is intentional; resolve it manually and verify with your ORM's
-generate command.
+Describing something buildable is not a request to start building; it is
+the input to `/feature`.
 
-### Object Storage (Bucket)
+### 1. Building a feature: grill before you build
 
-Every Railway environment gets its own isolated S3-compatible bucket. Bucket
-credentials are available as environment variables in your app service:
+`/feature` does NOT start coding on invocation. It drives five phases
+with a stop-and-ask gate between each one:
 
-| Variable | Purpose |
-|---|---|
-| `AWS_S3_BUCKET_NAME` | Globally unique S3 bucket name |
-| `AWS_ENDPOINT_URL` | S3 endpoint |
-| `AWS_ACCESS_KEY_ID` | S3 access key |
-| `AWS_SECRET_ACCESS_KEY` | S3 secret key |
-| `AWS_DEFAULT_REGION` | S3 region (e.g., `auto`) |
+0. name and resume (`set-feature-name.sh` slugs the branch and provisions
+   the Railway environment in the background, feature context created)
+1. `/grilling` + `/domain-modeling`: interview until the frontier is
+   empty, glossary and ADRs written
+2. `/to-spec`: publish the spec to the tracker
+   (`docs/agents/issue-tracker.md`)
+3. `/to-tickets`: tracer-bullet tickets with blocking edges
+4. `/implement`: build the frontier ticket by ticket, `/tdd` at agreed
+   seams, full check and `/code-review` at the end
+5. push, report the Railway preview URL
+   (`bash .claude/scripts/get-railway-url.sh`), then choose the exit:
+   `/mergedev` or `/review`
 
-Use any S3-compatible client library (AWS SDK, Bun S3, boto3, etc.) to
-interact with the bucket. Railway uses virtual-hosted-style URLs, and most
-libraries handle this automatically when given the base endpoint.
+Never advance a gate on silence, and never skip phases 1 to 3 on your own
+judgement. Quick mode (straight to phase 4) requires an explicit
+`--quick` or the user saying so in words; you may propose it for a typo
+or a config tweak, never take it.
 
-**Environment isolation:** Each environment's bucket is completely separate.
-Feature branch environments get their own bucket with isolated credentials,
-so you won't accidentally touch production data.
-
-**Region:** Every service in every environment (production, dev, and
-every feature branch) defaults to **EU West (Amsterdam)**; none land in a
-US region. The app service and Postgres are pinned to
-`europe-west4-drams3a` via the `SERVICE_REGION` env var, and the bucket
-is created in `ams` via the `BUCKET_REGION` env var. Both knobs live at
-the top of `.github/workflows/harness-railway.yml` (production and dev)
-and `.github/workflows/feature-branch-railway.yml` (per-feature envs).
-Feature environments fork dev, so their bucket inherits `ams` from the
-dev bucket and cannot be re-pinned per feature (a bucket cannot be moved
-after creation). To use a different region, change **both** values in
-**both** workflows. Existing services do not migrate automatically, and
-after a `/harness-upgrade` re-check the values, since an upgrade can
-reset these harness-managed workflows back to the defaults.
-
-### Seed data
-
-Seed data runs by default on all environments. Production has
-`SEED_DATA=false` set automatically by the harness setup workflow, so it
-never gets seeded with demo data. Dev and feature environments do not have
-this variable, so they seed normally.
-
-Projects should check for this at the top of their seed script:
-
-```js
-if (process.env.SEED_DATA === "false") {
-  console.log("SEED_DATA=false, skipping seed");
-  process.exit(0);
-}
-```
-
-### Railway preview URL
-
-A PostToolUse hook (`.claude/hooks/post-push-railway-url.sh`) tries to
-fetch the Railway preview URL after every `git push`. However, hook output
-is not always visible in your context. **After your final push, always
-manually fetch and include the Railway URL in your summary:**
-
-```
-bash .claude/scripts/get-railway-url.sh
-```
-
-That helper polls the matching `feature/<name>` branch for `.railway-url`
-and prints it to stdout. The post-push hook delegates to the same script,
-so re-running it is the canonical recovery path when provisioning takes
-longer than the hook's ~80s budget. If you need the lower-level form
-(for example from a script that already knows the feature branch name):
-
-```
-git fetch origin feature/<name> && git show origin/feature/<name>:.railway-url
-```
-
-The publishing step is idempotent and self-healing: even if an earlier
-run was cancelled mid-mutation, a later workflow trigger on the same
-branch will look up the existing Railway environment and commit the
-missing `.railway-url`. The deployment trigger is healed the same way:
-every provisioning run repoints any trigger still targeting `dev` at
-`feature/<name>` and redeploys the app service, so a half-provisioned
-environment never silently serves dev code on the preview URL.
-Concurrent pushes to the same `claude/...` branch queue instead of
-cancelling, so a fresh push never interrupts in-flight provisioning.
-
-### 1. Starting a new feature
-
-Every new chat on a `claude/` branch is treated as a new feature, no
-`/feature` prefix needed. Just describe what you want to build.
-
-The session branch starts with a random codename
-(`claude/<adjective-scientist>-<id>`). Before the first push, Claude names
-the feature so the branch and Railway environment describe the work:
-
-1. Claude derives a short kebab-case slug from your task and runs
-   `bash .claude/scripts/set-feature-name.sh <slug>`. This writes
-   `.harness-feature`, commits it, and pushes.
-2. That push triggers the GitHub Action, which resolves the feature name
-   (the slug in `.harness-feature`, or the codename if it is missing),
-   creates `feature/<name>` from dev, and creates a Railway environment
-   duplicated from dev (its own Postgres instance and bucket).
-3. The Railway preview URL appears automatically after each push.
-
-If naming is skipped, the first code push still works: the feature branch
-and Railway environment fall back to the random codename. You can also use
-`/feature <description>` explicitly to name and start in one step.
+Throughout, the **feature context**
+(`.harness/feature-context/<slug>.md`, contract in `.claude/HARNESS.md`)
+is kept current: it is how a colleague picks this feature up tomorrow
+with `/continue` and lands mid-flow with the reasoning intact. A resumed
+session re-enters the flow from the tracker artifacts plus the feature
+context, not from memory.
 
 ### 2. Pushing code
 
@@ -205,12 +208,20 @@ branch and deletes the source claude/ branch.
 
 Use `/mergedev` or say "merge to dev". This writes `.pr-description.md`,
 commits, and pushes. The GitHub Action creates a PR and auto-merges it.
+`/mergedev` also retires the feature context; it never reaches `dev`.
 
 ### 3b. Submitting for review (instead of auto-merge)
 
 Use `/review` to create a PR without auto-merge. The PR stays open for
-team review, with the Railway preview URL included for live testing.
-Reviewers are assigned from `.harness-version` if configured.
+team review, carrying the `/code-review` findings, the spec link, and the
+Railway preview URL for live testing. Reviewers are assigned from
+`.harness-version` if configured. When the review is approved, land it
+with `/mergedev` (it reuses the open PR); merges go through `/mergedev`,
+not the GitHub merge button.
+
+Two different things both called review: `/code-review` is the agent
+review of the diff (Standards and Spec axes, runs at the end of `/feature`
+phase 4); `/review` is the process step that requests humans.
 
 ### 4. Automatic cleanup
 
@@ -242,8 +253,13 @@ to go directly from main with a fast-track patch release.
 Configure CI checks by adding a `check:` field to `.harness-version`:
 
 ```
-check: npm test && npm run lint
+check: node scripts/check-docs.mjs && npm test && npm run lint
 ```
+
+Keep `node scripts/check-docs.mjs` in the chain (the starter `package.json`
+also exposes it as `npm run check:docs`): it makes broken docs block
+auto-merge exactly like a type error, which is the only reason docs stay
+fresh. It has no dependencies and runs in under a second.
 
 When set, PRs to dev (and main) run the check command, and merges wait for
 checks to pass. See `.claude/HARNESS.md` for prerequisites.
@@ -254,28 +270,38 @@ Optional `.harness-version` fields:
 
 ```
 reviewers: teammate1, teammate2
-check: npm test && npm run lint
+check: node scripts/check-docs.mjs && npm test && npm run lint
 ```
 
 ## Available skills
 
 Run `/getting-started` to see all skills, or use these directly:
-- `/feature`: start a new feature (optional; auto-initializes on session start)
+- `/feature`: build a feature through the five-phase gated flow
+- `/brainstorm`: stress-test an idea; writes to the tracker only
 - `/mergedev`: merge to dev (auto-merge)
 - `/review`: submit PR for team review
+- `/code-review`: two-axis agent review of the diff (Standards, Spec)
 - `/release`: ship dev to production
 - `/hotfix`: emergency production fix
 - `/status`: team dashboard (with Railway preview URLs)
 - `/changelog`: generate changelog
 - `/deps`: handle Dependabot PRs
-- `/continue`: resume in-progress feature
+- `/continue`: resume an in-progress feature, feature context intact
 - `/rollback`: revert bad deploy
+- `/document`: write an ADR, audit docs against the diff, or find the one
+  home for a fact (`/document adr <title>`, `/document check`,
+  `/document <topic>`)
 - `/chat`: think and brainstorm without modifying the repo (a pure chat
   session pushes nothing, so it usually leaves no `feature/<name>` branch to
   clean up; only run `/endchat` if the session pushed at some point)
 - `/endchat`: clean up after `/chat` (deletes the orphaned `feature/<name>`
   branch left behind by a session that pushed, and switches local back to
   `dev`)
+
+The technique skills the flow chains (`/grilling`, `/domain-modeling`,
+`/to-spec`, `/to-tickets`, `/implement`, `/tdd`, `/diagnosing-bugs`,
+`/codebase-design`, `/writing-for-agents`) are also usable directly; see
+`/getting-started` for the full catalog.
 
 ## Dependency management
 

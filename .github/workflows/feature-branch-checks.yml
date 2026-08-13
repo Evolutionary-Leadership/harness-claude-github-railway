@@ -19,6 +19,11 @@ on:
       - '.pr-description.md'
       - '.harness-init'
       - '.harness-feature'
+      # Feature-context refreshes (see .claude/HARNESS.md) are prose-only
+      # state updates; running the check suite on each would make context
+      # pushes expensive and ration the updates the flow depends on. The
+      # merge PR run still checks the full tree.
+      - '.harness/feature-context/**'
   pull_request:
     branches: [dev, main]
 

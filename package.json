@@ -5,7 +5,8 @@
   "description": "Delete-me starter that proves the harness Railway pipeline is live. Replace with your real app.",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check:docs": "node scripts/check-docs.mjs"
   },
   "engines": {
     "node": ">=20"

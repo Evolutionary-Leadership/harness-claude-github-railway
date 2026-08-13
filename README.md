@@ -1,4 +1,4 @@
-> Generated from `evolutionary-leadership/harness-forge@b9d1791`. Do not edit here. Edit in the source repo.
+> Generated from `evolutionary-leadership/harness-forge@8603c4a`. Do not edit here. Edit in the source repo.
 
 # harness-claude-github-railway
 
@@ -89,14 +89,34 @@ build. The first session provisions your first preview environment.
 
   | Command | What it does |
   |---|---|
-  | `/feature` | Start a feature (optional; a new session auto-initializes one). |
+  | `/chat` | Talk it through; nothing is written. |
+  | `/brainstorm` | Grill an idea relentlessly; keep it as a tracker issue, or drop it. |
+  | `/feature` | Build a feature through five gated phases: grill, spec, tickets, implement, hand over. |
   | `/mergedev` | Open a PR into `dev` and auto-merge it. |
-  | `/review` | Open a PR for human review instead of auto-merging. |
+  | `/review` | Open a PR for human review instead of auto-merging, preview URL included. |
+  | `/code-review` | Agent review of the diff on two axes: Standards and Spec. |
   | `/release` | Promote `dev` to `main`, tag, and cut a GitHub Release. |
   | `/status` | Dashboard of active features, preview URLs, open PRs. |
+  | `/document` | Write a decision record, audit docs against your diff, or find the one home for a fact. |
   | `/rollback`, `/changelog`, `/deps`, `/continue` | Revert a release, generate notes, batch Dependabot PRs, resume work. |
 
-  Run `/getting-started` any time to list them all.
+  Run `/getting-started` any time to list them all, including the
+  technique skills the flow chains (`/grilling`, `/tdd`, `/to-spec`,
+  `/to-tickets`, `/implement`, `/diagnosing-bugs`, and more), adapted from
+  [mattpocock/skills](https://github.com/mattpocock/skills) (MIT) and
+  owned by the harness.
+- **A documentation layout built for AI readers.** Nearly every reader of
+  your docs is an agent starting a fresh session with no memory, and
+  `CLAUDE.md` is the only part that loads automatically, every time. So the
+  scaffold gives you `docs/README.md` as an index-manifest (every doc, what
+  it owns), `docs/architecture/` for per-subsystem catalogs that declare
+  which source files they describe, `docs/decisions/` for numbered decision
+  records, `docs/runbooks/`, and skeletons for the glossary, security, and
+  testing docs. `scripts/check-docs.mjs` is a zero-dependency checker that
+  fails on broken links, unindexed docs, stale references, and surface
+  tables that no longer match the code. Put it in your `check:` line and
+  broken docs block auto-merge exactly like a type error. The `docs-updater`
+  agent runs the same rules automatically on `/mergedev` and `/review`.
 - **A starter `claude-md-snippet.md`** to paste into your project's
   `CLAUDE.md`, plus an `.env.example` listing the variables the starter
   expects.
@@ -128,6 +148,26 @@ that is by design.
 | CI checks | Only on the PR to `dev` or `main` |
 
 See `.claude/HARNESS.md` for the full mechanics.
+
+## How a team works in this repo
+
+Every session opens by stating what it is: **chat** (talk, write
+nothing), **brainstorm** (stress-test an idea; at most an idea issue on
+the tracker), or **feature** (build, through gated phases). A feature is
+grilled before it is built: `/feature` interviews you until the design
+tree has no open questions, publishes a spec issue, slices it into
+blocking-ordered tickets, implements ticket by ticket test-first, runs an
+agent code review, and only then asks how you want it merged: `/mergedev`
+(auto-merge) or `/review` (a PR your teammates approve, testable at the
+Railway preview URL, landed afterwards with `/mergedev`).
+
+The whole way through, the feature's state and reasoning live in a
+committed **feature context** file on the feature branch. Stop any time,
+on any day; a colleague runs `/continue`, reads the context beside the
+branch list, and lands mid-flow with the decisions, rejections, and next
+step intact. At merge time the context feeds the PR description and the
+docs audit, then disappears; what deserves to outlive the feature is
+promoted into `docs/` where the documentation standard owns it.
 
 ## Make it yours
 

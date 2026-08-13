@@ -152,6 +152,8 @@ files (write-once) and the legacy upgrade path must never overwrite them:
 - `server.js`
 - `package.json`
 - `.gitignore`
+- `docs/**` (the documentation skeleton; create only what is missing)
+- `scripts/check-docs.mjs`
 
 Then skip to step 6 (present the upgrade plan in the legacy format).
 
@@ -168,11 +170,17 @@ entry, determine its relevance to this project:
 
 **STARTER (skip-if-exists)**: write-once scaffold files for this variant:
 - `scope: starter` where `VARIANT` appears in `affects.variants`
-- These are seed files (e.g. `server.js`, `package.json`, `.gitignore`) the
-  harness ships as a starting point. They are created once on init, never
+- These are seed files the harness ships as a starting point: the app
+  scaffold (`server.js`, `package.json`, `.gitignore`), the documentation
+  skeleton (`docs/README.md`, `docs/GLOSSARY.md`, `docs/SECURITY.md`,
+  `docs/TESTING.md`, the `TEMPLATE.md` files, the seed ADR), and the docs
+  checker (`scripts/check-docs.mjs`). They are created once, never
   overwritten on upgrade, and never recreated if the user has deleted them.
 - Treated separately from MUST APPLY: only included in the upgrade plan when
   the local file is missing.
+- Skip-if-exists is **per file**, not per directory. A project that already
+  has `docs/README.md` but no `docs/SECURITY.md` gets exactly the missing
+  file, and its existing content is never touched.
 
 **RECOMMENDED**: trait changes matching the repo's installed traits:
 - `scope: trait` where any trait in `affects.traits` appears in the repo's
@@ -207,6 +215,8 @@ For each **MUST APPLY** change:
   | `templates/$VARIANT/server.js` | `server.js` |
   | `templates/$VARIANT/package.json` | `package.json` |
   | `templates/$VARIANT/.gitignore` | `.gitignore` |
+  | `templates/$VARIANT/docs/` | `docs/` |
+  | `templates/$VARIANT/scripts/` | `scripts/` |
   | `templates/$VARIANT/.harness-version` | `.harness-version` |
   | `templates/$VARIANT/claude-md-snippet.md` | *(reference only; see step 7)* |
 
@@ -232,7 +242,8 @@ For each **RECOMMENDED** trait change:
 
 For each **STARTER** change:
 - Resolve the local destination from the path-mapping table above
-  (`server.js`, `package.json`, `.gitignore`).
+  (`server.js`, `package.json`, `.gitignore`, `docs/**`,
+  `scripts/check-docs.mjs`).
 - If the local file already exists, **skip this change entirely**: do not
   diff, do not fetch the upstream content, do not include it in the upgrade
   plan. The user has either kept the starter as-is or replaced it with their
@@ -273,7 +284,8 @@ Configuration (merge carefully):
 
 ━━ STARTER: missing scaffold files ━━━━━━━━━━━━━━━━━━━━━━━━
 Only shown when a starter file is missing locally. Existing starter files
-are never touched.
+are never touched. Skip-if-exists is per file, so a partial docs/ tree is
+completed rather than replaced.
 
   • {filename}: would be created from upstream ({version})
 
@@ -285,6 +297,8 @@ Also new since {CURRENT}:
 ━━ CLAUDE.md ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Suggestions from updated claude-md-snippet.md:
   {changes if any}
+Router-ification (only when CLAUDE.md exceeds ~500 lines):
+  {catalog sections that would move to docs/architecture/}
 ```
 
 After presenting the plan, **ask the user for confirmation** before making
@@ -328,6 +342,41 @@ line to CLAUDE.md:
 ```
 Read `.claude/traits/` for stack-specific best practices before writing code.
 ```
+
+**CLAUDE.md router-ification** (suggest only, never apply automatically):
+
+Count the lines in the project's `CLAUDE.md`. If it exceeds **500 lines**,
+it has almost certainly accumulated catalog content that is being paid for
+on every session. Offer the extraction:
+
+```
+━━ CLAUDE.md is {N} lines ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CLAUDE.md loads on every session. Under the harness docs standard it is a
+router with a ~300-line budget: conventions, one-way decisions, definition
+of done, don't-touch list, writing rules, and a map of which doc to read.
+
+Catalog sections I found that belong in docs/architecture/:
+  • "{heading}" (lines {a}-{b}) -> docs/architecture/{suggested}.md
+    sources: [{globs covering the files that section describes}]
+
+Want me to extract them? Each extracted file gets YAML front-matter with
+`sources:` globs, an index row in docs/README.md, and CLAUDE.md keeps a one
+line pointer in its map table. Nothing is deleted without a new home.
+```
+
+Identify candidate sections by shape, not by topic: a section is a catalog
+if it is mostly a table or list enumerating routes, tools, components,
+tables, env vars, or files. Conventions, invariants, and rules stay in the
+router no matter how long they are.
+
+**Only extract if the user says yes.** When they do:
+- create `docs/architecture/<name>.md` with the `sources:` front-matter
+- move the content verbatim, do not rewrite it in the same pass
+- delete the section from `CLAUDE.md` (one home per fact) and leave a row in
+  its map table pointing at the new file
+- add the index row to `docs/README.md`
+- run `node scripts/check-docs.mjs` and fix what it reports
 
 ### 8. Update the version stamp
 

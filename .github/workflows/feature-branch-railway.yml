@@ -14,9 +14,16 @@ concurrency:
 
 jobs:
   provision-railway:
+    # The head-commit-message clause skips provisioning/heal runs for pushes
+    # that only refresh the feature-context file (see .claude/HARNESS.md):
+    # the skills commit pure context refreshes with the `chore(context):`
+    # prefix, and such a push changes nothing Railway needs to act on.
+    # Note this skips only this workflow; Railway's own deployment trigger
+    # still watches the feature branch and redeploys on any push to it.
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
-      startsWith(github.event.workflow_run.head_branch, 'claude/')
+      startsWith(github.event.workflow_run.head_branch, 'claude/') &&
+      !startsWith(github.event.workflow_run.head_commit.message, 'chore(context):')
     runs-on: ubuntu-latest
     permissions:
       contents: write

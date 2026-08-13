@@ -107,7 +107,7 @@ harness: harness-claude-github-railway
 version: 0.3.38
 repo: evolutionary-leadership/harness-forge
 traits: nodejs, typescript, express
-check: npm test && npm run lint
+check: node scripts/check-docs.mjs && npm test && npm run lint
 reviewers: teammate1, teammate2
 ```
 
@@ -117,7 +117,9 @@ reviewers: teammate1, teammate2
   diff against the latest release.
 - **`repo`**: the upstream forge repo (`evolutionary-leadership/harness-forge`),
   which hosts `VERSION`, `migrations/`, and `stacks/traits/`.
-- **`check`**: CI command to run on PRs to dev. When configured, the
+- **`check`**: CI command to run on PRs to dev. Keep
+  `node scripts/check-docs.mjs` at the front of the chain so documentation
+  drift fails the merge gate like any other error. When configured, the
   `feature-branch-checks.yml` workflow runs this command (also on every
   push to a `claude/**` branch, for feedback before the merge PR exists),
   and mergedev polls the run's conclusion on the PR head, merging only on
@@ -288,6 +290,95 @@ pin (`SERVICE_REGION`) described above. Production and dev buckets are
 created directly; feature buckets inherit `ams` from the forked dev
 bucket and cannot be re-pinned per feature (see "Region default").
 
+## The feature flow
+
+### The three-rung ladder
+
+Every session starts by stating its flavor explicitly (the opening
+question in `/getting-started`):
+
+| Rung | Skill | Writes to |
+|---|---|---|
+| Talk | `/chat` | nothing |
+| Think | `/brainstorm` | the tracker only (an idea issue, if kept) |
+| Build | `/feature` | the repo, through five gated phases |
+
+`/brainstorm` runs the same interview engine as `/feature` phase 1
+(`/grilling` plus `/domain-modeling`) and ends by asking where the
+thinking lands: nowhere, an idea issue, or straight into `/feature`.
+`/feature #<issue>` consumes an idea issue and grills only the remaining
+frontier. All tracker conventions live in `docs/agents/issue-tracker.md`.
+
+### The feature context
+
+`.harness/feature-context/<feature-slug>.md`, committed on the feature
+branch, is the feature's memory across sessions and colleagues: colleague
+A stops mid-feature, colleague B runs `/continue` the next day and lands
+mid-flow with the reasoning intact. It exists to serve `/continue` and to
+be the current summary of the feature at any point in time; it is not
+application documentation, which lives in `docs/` (the docs standard owns
+it after the merge).
+
+**Format.** One file per feature slug (so concurrent features never
+collide), rewritten in place, never an append-only log. Length is fine;
+staleness is not. Sections:
+
+- **Phase and next step**: where the flow stands and the single explicit
+  next action.
+- **Decisions settled**: each with the reasoning and the rejected
+  alternatives. Mark one-way decisions; write "ADR to follow", never an
+  `ADR NNNN` number before that ADR file exists (the docs checker
+  validates ADR references it can see).
+- **Open frontier**: the questions still unanswered.
+- **Out of scope**: the boundary the grill settled.
+- **Tracker**: spec issue, ticket issues and their state, the idea issue
+  if one started this.
+- **Exit route**: `/mergedev` or `/review`, once chosen; "awaiting human
+  review" while a `/review` PR is open.
+
+Link issues by `#number` or URL; never use relative markdown links in
+this file.
+
+**Lifecycle.** `/feature` phase 0 creates it. Any agent that finishes
+work on the feature refreshes it whenever the result changes what a fresh
+reader would need (a decision settled, a ticket landed, direction
+changed). Commits are cheap and continuous; pushes ride along with pushes
+already happening, plus a mandatory push at every phase gate and at
+session end (only the pushed copy survives the container). Commit a pure
+context refresh (a commit touching only this file) with the message
+prefix `chore(context):`; the harness workflows use both signals to skip
+busywork: pushes that touch only this file skip the CI checks
+(`feature-branch-checks.yml` ignores the path), the Railway provisioning
+workflow skips runs whose head commit carries the prefix, and the starter
+`railway.json`'s `watchPatterns` allowlist means a context-only push
+triggers no Railway deploy (keep `.harness/**` out of your watch patterns
+to preserve that). At merge time `/mergedev` uses it to draft the PR
+description, promotes anything permanent into `docs/`, and deletes it: it
+never reaches `dev`. If a merge bypasses `/mergedev` (the GitHub merge
+button), `feature-merge-cleanup.yml` removes the leftover from dev, and
+`/continue` and `/mergedev` also sweep strays as a safety net.
+
+### The two reviews
+
+- **`/code-review` reviews code**: two axes (Standards, Spec) in parallel
+  sub-agents, run automatically at the end of `/feature` phase 4.
+- **`/review` requests humans**: opens a non-auto-merged PR carrying the
+  `/code-review` findings, the spec link, and the Railway preview URL.
+  Approved `/review` PRs land via `/mergedev` (which reuses the open PR),
+  never the GitHub merge button.
+
+`/feature` phase 5 always asks which exit the user wants, suggesting
+`/review` when `.harness-version` configures `reviewers:` and `/mergedev`
+otherwise.
+
+### The cells differ only in the Railway steps
+
+The skill catalog is identical across the two template variants. The one
+permitted exception: `feature/SKILL.md` may differ in the
+Railway-specific steps of phase 0 (provisioning note) and phase 5
+(preview-URL reporting). Any other difference between the variants'
+skills is a bug; report it upstream rather than working around it.
+
 ## Managed trait files
 
 Stack-specific best practices live in `.claude/traits/` as separate
@@ -343,7 +434,7 @@ These files are maintained by the harness and replaced on
 | `.github/workflows/release.yml` | Creates release PR dev → main, tags version, creates GitHub Release |
 | `.github/workflows/hotfix.yml` | Handles hotfix PRs to main, tags patch release, back-merges to dev |
 | `.github/workflows/feature-branch-railway.yml` | Creates Railway environment with Postgres and bucket when a new feature branch is created |
-| `.github/workflows/feature-merge-cleanup.yml` | Deletes Railway environment (including Postgres and bucket) and feature branch after merge to dev |
+| `.github/workflows/feature-merge-cleanup.yml` | Deletes Railway environment (including Postgres and bucket) and feature branch after merge to dev, and removes a leftover feature-context file if the merge bypassed `/mergedev` |
 | `.github/workflows/feature-branch-cleanup.yml` | Fallback cleanup if a feature branch is deleted manually |
 | `.claude/scripts/session-start.sh` | Session startup hook |
 | `.claude/scripts/list-skills.sh` | Skill discovery script |
@@ -352,21 +443,33 @@ These files are maintained by the harness and replaced on
 | `.claude/scripts/get-railway-url.sh` | On-demand Railway preview URL fetcher (polls; usable both from the post-push hook and as a manual recovery command) |
 | `.claude/hooks/post-push-railway-url.sh` | Runs after `git push`; delegates to `get-railway-url.sh` to fetch the Railway preview URL |
 | `.claude/hooks/prevent-em-dash.sh` | Blocks writes containing U+2014 em dashes |
-| `.claude/skills/getting-started/SKILL.md` | Orientation skill |
-| `.claude/skills/feature/SKILL.md` | `/feature` skill |
-| `.claude/skills/mergedev/SKILL.md` | `/mergedev` skill |
-| `.claude/skills/review/SKILL.md` | `/review` skill: submit PR for team review |
+| `.claude/skills/getting-started/SKILL.md` | Orientation skill: the session-opening flavor question, the skill catalog, the two-review pair |
+| `.claude/skills/feature/SKILL.md` | `/feature` skill: the five-phase gated flow (name, grill, spec, tickets, implement, hand over) |
+| `.claude/skills/brainstorm/SKILL.md` | `/brainstorm` skill: standalone grilling that writes to the tracker only |
+| `.claude/skills/mergedev/SKILL.md` | `/mergedev` skill: merge to dev; owns the merge-conflict discipline and retires the feature context |
+| `.claude/skills/review/SKILL.md` | `/review` skill: submit PR for team review, with `/code-review` findings in the body |
 | `.claude/skills/release/SKILL.md` | `/release` skill: ship dev to production |
 | `.claude/skills/hotfix/SKILL.md` | `/hotfix` skill: emergency production fix |
 | `.claude/skills/status/SKILL.md` | `/status` skill: team dashboard |
 | `.claude/skills/changelog/SKILL.md` | `/changelog` skill: generate changelog |
 | `.claude/skills/deps/SKILL.md` | `/deps` skill: handle Dependabot PRs |
-| `.claude/skills/continue/SKILL.md` | `/continue` skill: resume in-progress feature |
+| `.claude/skills/continue/SKILL.md` | `/continue` skill: resume an in-progress feature via its feature context |
 | `.claude/skills/chat/SKILL.md` | `/chat` skill: conversation mode (no file changes) |
 | `.claude/skills/endchat/SKILL.md` | `/endchat` skill: clean up the orphan feature branch left behind by `/chat` |
 | `.claude/skills/rollback/SKILL.md` | `/rollback` skill: revert bad deploy |
 | `.claude/skills/harness-upgrade/SKILL.md` | `/harness-upgrade` skill |
-| `.claude/agents/docs-updater.md` | Documentation auditor agent (runs during mergedev) |
+| `.claude/skills/document/SKILL.md` | `/document` skill: scaffold an ADR, audit docs against the diff, route a fact to its one home |
+| `.claude/skills/grilling/` | `/grilling` skill: the relentless-interview engine (frontier, design tree) |
+| `.claude/skills/domain-modeling/` | `/domain-modeling` skill: glossary and ADR discipline while designing |
+| `.claude/skills/to-spec/` | `/to-spec` skill: synthesize the conversation into a spec issue |
+| `.claude/skills/to-tickets/` | `/to-tickets` skill: slice a spec into tracer-bullet tickets with blocking edges |
+| `.claude/skills/implement/` | `/implement` skill: work the ticket frontier, `/tdd` at agreed seams |
+| `.claude/skills/tdd/` | `/tdd` skill: the red-green loop, seams, test anti-patterns |
+| `.claude/skills/code-review/` | `/code-review` skill: two-axis (Standards, Spec) agent review of a diff |
+| `.claude/skills/diagnosing-bugs/` | `/diagnosing-bugs` skill: feedback-loop-first debugging discipline |
+| `.claude/skills/codebase-design/` | `/codebase-design` skill: deep-module vocabulary and design patterns |
+| `.claude/skills/writing-for-agents/` | `/writing-for-agents` skill: how to write skills and agent-facing docs |
+| `.claude/agents/docs-updater.md` | Documentation auditor agent (runs during `/mergedev` and `/review`) |
 | `.claude/HARNESS.md` | This file |
 | `.harness-version` | Version tracking |
 | `.claude/traits/*.md` | Stack best practices (managed per `traits:` in `.harness-version`) |
@@ -424,6 +527,45 @@ sessions against stream idle timeouts. Keep these values (or raise them)
 when you add your own keys; see "Avoiding stream timeouts" in
 `claude-md-snippet.md` for context.
 
+## Documentation standard
+
+The harness scaffolds a documentation layout built for AI readers. Nearly
+every reader of this repo's docs is an agent starting a fresh session with
+no memory, and `CLAUDE.md` is the only part that loads automatically, on
+every session. So the layout minimizes auto-loaded context and pushes
+detail into files retrieved on demand.
+
+| Layer | Path | Owns | Budget |
+|---|---|---|---|
+| Router | `CLAUDE.md` | Conventions, one-way decisions, definition of done, don't-touch list, writing rules, and a map of which doc to read | 300 lines |
+| Reference | `docs/architecture/*.md` | Per-subsystem catalogs, each declaring `sources:` globs in YAML front-matter | 400 lines each |
+| Rationale | `docs/decisions/NNNN-*.md` | Numbered ADRs, append-only once accepted | no limit |
+| Procedure | `docs/runbooks/*.md` | Operations that have bitten someone | no limit |
+| Manifest | `docs/README.md` | The index: every doc, what it owns, when to update it | no limit |
+
+Four rules hold it together: one home per fact; code is truth for WHAT and
+docs for WHY and WHERE; accepted ADRs are superseded, never rewritten; and
+freshness is mechanical, enforced by `scripts/check-docs.mjs`.
+
+Wire the checker into `.harness-version` so broken docs block auto-merge
+exactly like a type error:
+
+```
+check: node scripts/check-docs.mjs && npm test
+```
+
+`/document` writes ADRs, audits the diff against the manifest, and routes a
+fact to its owning doc. The `docs-updater` agent runs the same taxonomy
+automatically during `/mergedev` and `/review`.
+
+The rationale for the layout ships as ADR 0001 in `docs/decisions/`.
+
+This variant also ships one filled-in reference doc,
+`docs/architecture/railway-environments.md`, which owns the per-environment
+Postgres, bucket, app-service, region, and preview-URL facts. `CLAUDE.md`
+keeps only the invariants and a pointer to it, which is the shape every
+other subsystem doc should copy.
+
 ## Starter scaffold (write-once)
 
 The harness ships a minimal Node + Express "it works" app so the Railway
@@ -435,6 +577,12 @@ pipeline has something to deploy on the very first push. These files are
 | `server.js` | Replace with your real app, or delete entirely if not using Node |
 | `package.json` | Replace with your real manifest, or delete entirely if not using Node |
 | `.gitignore` | Extend for your stack |
+| `docs/README.md` | Your index. Add a row per doc; the harness never clobbers your rows |
+| `docs/GLOSSARY.md`, `docs/SECURITY.md`, `docs/TESTING.md` | Fill in with project facts |
+| `docs/architecture/TEMPLATE.md`, `docs/decisions/TEMPLATE.md`, `docs/runbooks/TEMPLATE.md` | Copy them, do not edit in place |
+| `docs/architecture/railway-environments.md` | Yours to extend as you build on the Railway environment |
+| `docs/decisions/0001-adopt-the-ai-native-documentation-standard.md` | A dated record; supersede it rather than editing it |
+| `scripts/check-docs.mjs` | Extend with project-specific checks |
 
 Concretely:
 - If you edit any of these files, `/harness-upgrade` will **never overwrite
@@ -446,6 +594,8 @@ Concretely:
   runtime.
 - If a starter file is missing on a fresh scaffold (partial install), the
   next `/harness-upgrade` run will offer to create it from upstream.
+- Skip-if-exists applies **per file**, not per directory. A project with
+  `docs/README.md` but no `docs/SECURITY.md` gets exactly the missing file.
 
 ## Project-owned files
 
